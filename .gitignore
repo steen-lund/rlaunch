@@ -1,5 +1,2 @@
 *.swp
-.tundra*
-tundra-output
-t2-output
-/vbcc/*
+build*/

@@ -336,4 +336,4 @@ void rl_describe_msg(const rl_msg_t *message, char *buffer, size_t max)
 	header.write('#endif\n')
 
 if __name__ == '__main__':
-	mkmsg(sys.stdin, sys.argv[1])
+	mkmsg(open(sys.argv[2]) if len(sys.argv) > 2 else sys.stdin, sys.argv[1])

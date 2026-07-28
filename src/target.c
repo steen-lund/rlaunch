@@ -566,7 +566,7 @@ static void common_main(const char *bind_address, int bind_port)
 
 	rl_memset(&listen_address, 0, sizeof(listen_address));
 	listen_address.sin_family = AF_INET;
-	listen_address.sin_port = htons((u_short)bind_port);
+	listen_address.sin_port = htons((unsigned short)bind_port);
 	listen_address.sin_addr.s_addr = inet_addr(bind_address);
 
 	if (0 != bind(listener_fd, (struct sockaddr*)&listen_address, sizeof(listen_address)))

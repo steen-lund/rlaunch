@@ -13,6 +13,20 @@ on a PC platform and then test the resulting binaries immediately on an Amiga
 computer without copying files. Output from the program is channeled back to
 the controlling PC as if it was run locally.
 
+BUILDING
+===============================================================================
+
+Host tools (rl-controller and a host rl-target):
+
+    cmake -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build
+
+Amiga target (needs docker; vbcc is taken from the terriblefire78/vbcc image,
+which is pulled and patched up on the first configure):
+
+    cmake -B build-amiga -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/amiga-vbcc.cmake
+    cmake --build build-amiga
+
 INSTALLATION
 ===============================================================================
 

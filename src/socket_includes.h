@@ -11,8 +11,11 @@
 #endif
 
 
+#if defined(RL_POSIX)
+#include <sys/types.h> /* Roadshow/AmiTCP supply their own types via sys/socket.h */
+#endif
+
 #if defined(RL_AMIGA) || defined(RL_POSIX)
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
