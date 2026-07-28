@@ -11,6 +11,8 @@ on:
 
 jobs:
 
+  # The amiga binary is built once here; the other jobs download it so every
+  # package contains a host controller plus the amiga target it talks to.
   Linux:
     runs-on: ubuntu-latest
     steps:
@@ -23,8 +25,22 @@ jobs:
       run: |
         cmake -B build-amiga -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/amiga-vbcc.cmake
         cmake --build build-amiga -j 4
+    - name: package
+      run: |
+        mkdir -p dist
+        cp build/rl-controller build/rl-target dist/
+        cp build-amiga/rl-target dist/rl-target.amiga
+    - uses: actions/upload-artifact@v4
+      with:
+        name: rlaunch-amiga
+        path: build-amiga/rl-target
+    - uses: actions/upload-artifact@v4
+      with:
+        name: rlaunch-linux
+        path: dist
 
   macOS:
+    needs: Linux
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v3
@@ -32,8 +48,22 @@ jobs:
       run: |
         cmake -B build -DCMAKE_BUILD_TYPE=Release
         cmake --build build -j 4
+    - uses: actions/download-artifact@v4
+      with:
+        name: rlaunch-amiga
+        path: amiga
+    - name: package
+      run: |
+        mkdir -p dist
+        cp build/rl-controller build/rl-target dist/
+        cp amiga/rl-target dist/rl-target.amiga
+    - uses: actions/upload-artifact@v4
+      with:
+        name: rlaunch-macos
+        path: dist
 
   Windows:
+    needs: Linux
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v3
@@ -41,3 +71,17 @@ jobs:
       run: |
         cmake -B build
         cmake --build build --config Release
+    - uses: actions/download-artifact@v4
+      with:
+        name: rlaunch-amiga
+        path: amiga
+    - name: package
+      shell: bash
+      run: |
+        mkdir -p dist
+        cp build/Release/rl-controller.exe build/Release/rl-target.exe dist/
+        cp amiga/rl-target dist/rl-target.amiga
+    - uses: actions/upload-artifact@v4
+      with:
+        name: rlaunch-windows
+        path: dist
