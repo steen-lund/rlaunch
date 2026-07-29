@@ -27,6 +27,8 @@ jobs:
       run: |
         cmake -B build-amiga -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/amiga-vbcc.cmake
         cmake --build build-amiga -j 4
+    - name: test amigafs on the host
+      run: test/amigafs-host-test.sh
     - name: package
       run: |
         mkdir -p dist

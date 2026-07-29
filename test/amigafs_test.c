@@ -1,0 +1,254 @@
+/*
+ * Unit tests for amigafs.c, run on the host.
+ *
+ * amigafs.c compiles unmodified against the real NDK headers with _NO_INLINE
+ * (which turns the proto/ headers into plain prototypes), so the code under
+ * test is the same code that ships. Only the AmigaOS entry points are faked --
+ * see amiga_stubs.c.
+ *
+ * Each test hands the filesystem a DosPacket, checks the rlnet request it puts
+ * on the wire, feeds back an answer, and checks how the packet was replied to.
+ *
+ * Built -m32 inside the vbcc image; see test/amigafs-host-test.sh.
+ */
+
+#include "config.h"
+#include "amigafs.h"
+#include "protocol.h"
+#include "rlnet.h"
+#include "util.h"
+
+/* Deliberately not peer.h: under RL_AMIGA it drags in socket_types.h, whose
+ * socklen_t typedef fights with the host's. amigafs.h only ever handles the
+ * peer as an opaque pointer, so the declaration below is all that is needed. */
+struct peer_tag;
+
+#include <exec/types.h>
+#include <exec/ports.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "third_party/utest.h"
+
+UTEST_MAIN();
+
+void rl_test_reset_dos_entries(void);
+
+#define TEST_REQUIRE(expr)                                                     \
+	do {                                                                       \
+		if (!(expr)) {                                                         \
+			fprintf(stderr, "%s:%d: setup failed: %s\n",                       \
+					__FILE__, __LINE__, #expr);                                \
+			abort();                                                           \
+		}                                                                      \
+	} while (0)
+
+/* ------------------------------------------------------------------------
+ * Harness
+ * ------------------------------------------------------------------------ */
+
+/*
+ * amigafs.c reaches the network through exactly one function, so standing in
+ * for it is the whole of the peer side. Messages are captured rather than
+ * encoded, which keeps peer.c and transport.c -- and the Amiga socket headers
+ * they drag in -- out of this build entirely.
+ */
+#define MAX_CAPTURED 16
+
+static rl_msg_t captured[MAX_CAPTURED];
+static int captured_count;
+static int captured_taken;
+
+int peer_transmit_message(struct peer_tag *self, const rl_msg_t *msg)
+{
+	(void)self;
+	TEST_REQUIRE(captured_count < MAX_CAPTURED);
+	captured[captured_count++] = *msg;
+	return 0;
+}
+
+typedef struct fs_fixture_tag
+{
+	rl_amigafs_t fs;
+	struct MsgPort reply_port;
+} fs_fixture_t;
+
+static void fixture_init(fs_fixture_t *fix)
+{
+	rl_test_reset_dos_entries();
+	captured_count = 0;
+	captured_taken = 0;
+
+	rl_memset(fix, 0, sizeof(*fix));
+
+	fix->reply_port.mp_MsgList.lh_Head = (struct Node *)&fix->reply_port.mp_MsgList.lh_Tail;
+	fix->reply_port.mp_MsgList.lh_Tail = NULL;
+	fix->reply_port.mp_MsgList.lh_TailPred = (struct Node *)&fix->reply_port.mp_MsgList.lh_Head;
+
+	/* A NULL peer is fine: amigafs only dereferences it to print peer->ident,
+	 * and only when debug logging is on, which it is not here. */
+	TEST_REQUIRE(0 == rl_amigafs_init(&fix->fs, NULL, "TBL0"));
+}
+
+static void fixture_destroy(fs_fixture_t *fix)
+{
+	rl_amigafs_destroy(&fix->fs);
+}
+
+/* Take the oldest message the filesystem sent to the controller. */
+static int pop_request(fs_fixture_t *fix, rl_msg_t *out)
+{
+	(void)fix;
+
+	if (captured_taken >= captured_count)
+		return -1;
+
+	*out = captured[captured_taken++];
+	return 0;
+}
+
+/* A DosPacket plus the Message that carries it, laid out the way AmigaDOS
+ * does it: the packet hangs off the message's ln_Name. */
+typedef struct test_packet_tag
+{
+	struct StandardPacket sp;
+} test_packet_t;
+
+static struct DosPacket *make_packet(fs_fixture_t *fix, test_packet_t *tp, LONG type)
+{
+	rl_memset(tp, 0, sizeof(*tp));
+
+	tp->sp.sp_Msg.mn_Node.ln_Name = (char *)&tp->sp.sp_Pkt;
+	tp->sp.sp_Pkt.dp_Link = &tp->sp.sp_Msg;
+	tp->sp.sp_Pkt.dp_Port = &fix->reply_port;
+	tp->sp.sp_Pkt.dp_Type = type;
+	return &tp->sp.sp_Pkt;
+}
+
+/* Hand the packet to the filesystem the way DOS would. */
+static void send_packet(fs_fixture_t *fix, test_packet_t *tp)
+{
+	PutMsg(fix->fs.device_port, &tp->sp.sp_Msg);
+	rl_amigafs_process_device_message(&fix->fs);
+}
+
+/* Did the filesystem reply to the packet yet? */
+static int packet_was_replied(fs_fixture_t *fix)
+{
+	return NULL != GetMsg(&fix->reply_port);
+}
+
+/* Build a BSTR in a caller-supplied buffer and hand back a BPTR to it. */
+static BSTR make_bstr(char *storage, const char *text)
+{
+	size_t length = strlen(text);
+
+	storage[0] = (char)length;
+	memcpy(storage + 1, text, length);
+	storage[length + 1] = '\0';
+	return MKBADDR(storage);
+}
+
+/* ------------------------------------------------------------------------
+ * Tests
+ * ------------------------------------------------------------------------ */
+
+UTEST(amigafs, init_registers_and_destroy_removes_the_device)
+{
+	fs_fixture_t fix;
+
+	fixture_init(&fix);
+	ASSERT_TRUE(fix.fs.device_port != NULL);
+	ASSERT_TRUE(fix.fs.device_list != NULL);
+
+	/* Anything still holding the device name after teardown will send packets
+	 * to a port with no server, which hangs the caller forever. */
+	rl_amigafs_destroy(&fix.fs);
+	ASSERT_TRUE(NULL == FindDosEntry(NULL, (CONST_STRPTR)"TBL0", ~0u));
+}
+
+UTEST(amigafs, locate_object_asks_the_controller_for_the_path)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *root;
+	char name[64];
+	rl_msg_t request;
+
+	fixture_init(&fix);
+	root = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+	ASSERT_TRUE(root != NULL);
+
+	packet = make_packet(&fix, &tp, ACTION_LOCATE_OBJECT);
+	packet->dp_Arg1 = (LONG)MKBADDR(root);
+	packet->dp_Arg2 = (LONG)make_bstr(name, "hello.txt");
+	packet->dp_Arg3 = ACCESS_READ;
+	send_packet(&fix, &tp);
+
+	/* The answer has to come from the controller, so the packet must be held,
+	 * not replied to. */
+	ASSERT_FALSE(packet_was_replied(&fix));
+
+	ASSERT_EQ(0, pop_request(&fix, &request));
+	ASSERT_EQ(RL_MSG_OPEN_HANDLE_REQUEST, (int)rl_msg_kind_of(&request));
+	ASSERT_STREQ("hello.txt", request.open_handle_request.path);
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, a_locate_answer_completes_the_pending_packet)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *root;
+	char name[64];
+	rl_msg_t request, answer;
+
+	fixture_init(&fix);
+	root = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+
+	packet = make_packet(&fix, &tp, ACTION_LOCATE_OBJECT);
+	packet->dp_Arg1 = (LONG)MKBADDR(root);
+	packet->dp_Arg2 = (LONG)make_bstr(name, "hello.txt");
+	packet->dp_Arg3 = ACCESS_READ;
+	send_packet(&fix, &tp);
+
+	ASSERT_EQ(0, pop_request(&fix, &request));
+
+	RL_MSG_INIT(answer, RL_MSG_OPEN_HANDLE_ANSWER);
+	answer.open_handle_answer.hdr_in_reply_to = request.open_handle_request.hdr_sequence_num;
+	answer.open_handle_answer.handle = 7;
+	answer.open_handle_answer.type = RL_NODE_TYPE_FILE;
+	answer.open_handle_answer.size = 11;
+	rl_amigafs_process_network_message(&fix.fs, &answer);
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	/* LOCATE_OBJECT answers with a BPTR to the new lock, not a boolean. */
+	ASSERT_NE(0, packet->dp_Res1);
+	ASSERT_EQ(0, packet->dp_Res2);
+	ASSERT_TRUE(BADDR(packet->dp_Res1) != NULL);
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, a_die_packet_is_answered)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+
+	UTEST_SKIP("#17: ACTION_DIE never replies, so the sender waits forever");
+
+	fixture_init(&fix);
+	make_packet(&fix, &tp, ACTION_DIE);
+	send_packet(&fix, &tp);
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+
+	fixture_destroy(&fix);
+}

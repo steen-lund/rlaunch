@@ -39,6 +39,15 @@ Tests assert correct behaviour, so those covering a still-open bug begin with
 UTEST_SKIP("#N: ...") to keep the build green. Removing that one line is how
 you check a fix: the test should go from skipped to passing.
 
+amigafs.c is Amiga-only source, but it compiles unmodified for a 32-bit host
+against the real NDK headers in the vbcc image, so it can be unit tested by
+feeding it DosPackets directly:
+
+    test/amigafs-host-test.sh
+
+Only a dozen AmigaOS entry points are faked (test/amiga_stubs.c); the code
+under test is the code that ships.
+
 There is also an end-to-end test that boots AROS m68k under the Amiberry
 emulator, runs a real rl-target on it and drives it with the host controller:
 
@@ -50,8 +59,8 @@ Amiberry package ships AROS ROMs, and bsdsocket.library is emulated, so the
 target's TCP port appears as an ordinary listening socket on the host. CI runs
 this job non-blocking until it has proven stable.
 
-amigafs.c has no unit coverage -- only whatever the end-to-end test happens to
-exercise. Driving it properly on the host would need fake Exec/DOS headers.
+The two are complementary: the host tests pin down individual packet handling,
+the emulator proves the whole thing actually works on a real 68k.
 
 INSTALLATION
 ===============================================================================
