@@ -17,6 +17,7 @@
 #else
 #include <limits.h>
 #endif
+#include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -105,6 +106,64 @@ static int escapes_root(const char *input)
 	}
 }
 
+#if defined(RL_POSIX)
+/*
+ * The string checks above cannot see a symlink inside the served root that
+ * points out of it, so resolve the result and require the served root to still
+ * be a prefix. The last component may not exist yet (creating a file), in which
+ * case the directory it would land in is what has to be inside the root.
+ */
+static int inside_root(const char *path, const char *root_path)
+{
+	char real_root[PATH_MAX];
+	char real_path[PATH_MAX];
+	size_t root_len;
+
+	if (NULL == realpath(root_path, real_root))
+		return 0;
+
+	if (NULL == realpath(path, real_path))
+	{
+		char parent[PATH_MAX];
+		char *slash;
+
+		if (ENOENT != errno || rl_strlen(path) >= sizeof(parent))
+			return 0;
+
+		/* Trim components until one resolves; the root always does, so this
+		 * terminates. A missing leaf is a lookup that fails later as "not
+		 * found" -- what matters here is that the part which does exist is
+		 * inside the root. */
+		rl_string_copy(sizeof(parent), parent, path);
+
+		for (;;)
+		{
+			if (NULL == (slash = strrchr(parent, '/')) || parent == slash)
+				return 0;
+
+			*slash = '\0';
+
+			if (NULL != realpath(parent, real_path))
+				break;
+
+			if (ENOENT != errno)
+				return 0;
+		}
+	}
+
+	root_len = rl_strlen(real_root);
+
+	if (0 != strncmp(real_path, real_root, root_len))
+		return 0;
+
+	/* Guard the boundary so "/srv/rootless" doesn't pass as inside "/srv/root".
+	 * realpath() always returns an absolute path, so root_len is at least 1 and
+	 * a root of "/" already carries the separator. */
+	return '\0' == real_path[root_len] || '/' == real_path[root_len] ||
+		'/' == real_root[root_len - 1];
+}
+#endif
+
 static int fix_path(char *dest, size_t dest_size, const char *input, const char *root_path)
 {
 	size_t root_len = rl_strlen(root_path);
@@ -141,6 +200,9 @@ static int fix_path(char *dest, size_t dest_size, const char *input, const char 
 	}
 #else
 	rl_format_msg(dest, dest_size, "%s/%s", root_path, input);
+
+	if (!inside_root(dest, root_path))
+		return 1;
 #endif
 	return 0;
 }

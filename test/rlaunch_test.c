@@ -329,13 +329,21 @@ UTEST(format, string_copy_of_an_exact_fit_is_not_truncation)
 UTEST(fix_path, joins_against_the_served_root)
 {
 	char dest[260];
+	char expected[512];
+	char root[256];
 
-	ASSERT_EQ(0, fix_path(dest, sizeof(dest), "sub/file.txt", "/srv/root"));
+	/* A real directory: the POSIX check resolves the root, so a made-up one
+	 * would be rejected before the join is even looked at. */
+	make_temp_dir(root, sizeof(root));
+
 #ifdef RL_WIN32
-	ASSERT_STREQ("/srv/root\\sub\\file.txt", dest);
+	rl_format_msg(expected, sizeof(expected), "%s\\sub\\file.txt", root);
 #else
-	ASSERT_STREQ("/srv/root/sub/file.txt", dest);
+	rl_format_msg(expected, sizeof(expected), "%s/sub/file.txt", root);
 #endif
+
+	ASSERT_EQ(0, fix_path(dest, sizeof(dest), "sub/file.txt", root));
+	ASSERT_STREQ(expected, dest);
 }
 
 UTEST(fix_path, rejects_traversal_outside_the_served_root)
@@ -355,6 +363,27 @@ UTEST(fix_path, rejects_input_that_does_not_fit)
 
 	ASSERT_NE(0, fix_path(dest, sizeof(dest), overlong, "/srv/root"));
 }
+
+#if defined(RL_POSIX)
+UTEST(fix_path, rejects_a_symlink_pointing_out_of_the_served_root)
+{
+	char dest[260];
+	char base[256], root[512], sibling[512], link[512];
+
+	/* The escape target is a sibling whose name starts with the root's, so this
+	 * also pins the prefix comparison to a directory boundary. */
+	make_temp_dir(base, sizeof(base));
+	rl_format_msg(root, sizeof(root), "%s/root", base);
+	rl_format_msg(sibling, sizeof(sibling), "%s/rootless", base);
+	rl_format_msg(link, sizeof(link), "%s/out", root);
+
+	TEST_REQUIRE(0 == mkdir(root, 0777));
+	TEST_REQUIRE(0 == mkdir(sibling, 0777));
+	TEST_REQUIRE(0 == symlink(sibling, link));
+
+	ASSERT_NE(0, fix_path(dest, sizeof(dest), "out/secret.txt", root));
+}
+#endif
 
 /* -------------------------------------------------------------------------
  * file_server.c -- request handlers
