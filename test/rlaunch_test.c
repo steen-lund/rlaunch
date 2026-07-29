@@ -23,6 +23,7 @@
 #include "file_server.c"
 
 #include "socket_includes.h"
+#include "version.h"
 #include "third_party/utest.h"
 
 #include <limits.h>
@@ -34,6 +35,10 @@ UTEST_MAIN();
 /* -------------------------------------------------------------------------
  * Harness
  * ------------------------------------------------------------------------- */
+
+/* Out-of-memory injection, defined in util.c. -1 never fails, N fails the Nth
+ * allocation from now on. */
+extern int rl_test_alloc_fail_in;
 
 /* The ASSERT_* macros only work inside a UTEST body, so helpers use this. */
 #define TEST_REQUIRE(expr)                                                     \
@@ -585,6 +590,134 @@ UTEST(file_server, an_unhandled_request_replies_with_bad_request)
 	ASSERT_EQ(0, pop_reply(&peer, &reply));
 	ASSERT_EQ(RL_MSG_ERROR_ANSWER, (int)rl_msg_kind_of(&reply));
 	ASSERT_EQ((rl_uint32)RL_NETERR_BAD_REQUEST, reply.error_answer.error_code);
+
+	test_peer_destroy(&peer);
+}
+
+/* -------------------------------------------------------------------------
+ * peer handshake
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Everything on the handshake path is static in peer.c, and peer.c is linked
+ * in (not #included) so it cannot be reached the way file_server.c is. The
+ * transport is the seam instead: encode the request straight into the input
+ * buffer and let rl_transport_update() run the normal delivery callbacks.
+ */
+static void feed_message(peer_t *peer, const rl_msg_t *msg)
+{
+	rl_iobuf_t *in = &peer->transport.inbuf;
+	size_t used = 0;
+
+	TEST_REQUIRE(0 == rl_encode_msg(msg, (rl_uint8 *)in->write_cursor,
+			(int)(in->end_address - in->write_cursor), &used));
+	in->write_cursor += used;
+
+	rl_transport_update(&peer->transport);
+}
+
+static void make_handshake(rl_msg_t *msg, int major, int minor)
+{
+	rl_msg_handshake_request_t *req = &msg->handshake_request;
+
+	req->hdr_type = RL_MSG_HANDSHAKE_REQUEST;
+	req->hdr_flags = 0;
+	req->hdr_sequence_num = 0;
+	req->version_major = (rl_uint8) major;
+	req->version_minor = (rl_uint8) minor;
+	req->platform_name = "test";
+	req->node_name = "test-node";
+	req->platform_version = "1";
+	req->password_hash = "****";
+}
+
+/* A peer waiting for the handshake it is about to be given. */
+static void handshake_peer_init(peer_t *peer, rl_controller_t *ctl)
+{
+	test_peer_init(peer, ctl);
+	peer->state = PEER_WAIT_HANDSHAKE;
+}
+
+UTEST(peer_handshake, an_identical_version_connects)
+{
+	peer_t peer;
+	rl_controller_t ctl;
+	rl_msg_t handshake;
+
+	rl_memset(&ctl, 0, sizeof(ctl));
+	handshake_peer_init(&peer, &ctl);
+
+	make_handshake(&handshake, RLAUNCH_VER_MAJOR, RLAUNCH_VER_MINOR);
+	feed_message(&peer, &handshake);
+
+	ASSERT_EQ(PEER_CONNECTED, peer.state);
+	/* A target answers with its own handshake, so something must be on the wire. */
+	ASSERT_TRUE(NULL != peer.transport.out_queue);
+
+	test_peer_destroy(&peer);
+}
+
+UTEST(peer_handshake, a_differing_minor_version_is_rejected)
+{
+	peer_t peer;
+	rl_controller_t ctl;
+	rl_msg_t handshake;
+
+	rl_memset(&ctl, 0, sizeof(ctl));
+	handshake_peer_init(&peer, &ctl);
+
+	make_handshake(&handshake, RLAUNCH_VER_MAJOR, RLAUNCH_VER_MINOR + 1);
+	feed_message(&peer, &handshake);
+
+	ASSERT_EQ(PEER_ERROR, peer.state);
+
+	test_peer_destroy(&peer);
+}
+
+UTEST(peer_handshake, a_differing_major_version_is_rejected)
+{
+	peer_t peer;
+	rl_controller_t ctl;
+	rl_msg_t handshake;
+
+	rl_memset(&ctl, 0, sizeof(ctl));
+	handshake_peer_init(&peer, &ctl);
+
+	make_handshake(&handshake, RLAUNCH_VER_MAJOR + 1, RLAUNCH_VER_MINOR);
+	feed_message(&peer, &handshake);
+
+	ASSERT_EQ(PEER_ERROR, peer.state);
+
+	test_peer_destroy(&peer);
+}
+
+/*
+ * A target answers an accepted handshake with its own. If queueing that answer
+ * fails there is nothing on the wire for the controller to wait for, so the
+ * peer must stay in error rather than report itself connected.
+ */
+UTEST(peer_handshake, a_failed_reply_does_not_report_the_peer_connected)
+{
+	peer_t peer;
+	rl_controller_t ctl;
+	rl_msg_t handshake;
+
+	rl_memset(&ctl, 0, sizeof(ctl));
+	handshake_peer_init(&peer, &ctl);
+	ASSERT_EQ(PEER_INIT_TARGET, peer.init_mode);
+
+	make_handshake(&handshake, RLAUNCH_VER_MAJOR, RLAUNCH_VER_MINOR);
+
+	/* Starve the buffer the outgoing handshake is encoded into. This fails the
+	 * *next* allocation rather than a named call site, so it only stays aimed at
+	 * rl_transport_alloc_buffer() while nothing else on the receive-handshake
+	 * path allocates. Decoding does not, today. */
+	rl_test_alloc_fail_in = 0;
+	feed_message(&peer, &handshake);
+	rl_test_alloc_fail_in = -1;
+
+	ASSERT_EQ(PEER_ERROR, peer.state);
+	ASSERT_TRUE(NULL == peer.transport.out_queue);
 
 	test_peer_destroy(&peer);
 }

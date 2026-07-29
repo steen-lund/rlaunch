@@ -218,11 +218,18 @@ static void on_receive_handshake(peer_t *self, const rl_msg_t *param)
 
 	/* Require exactly the same version */
 	if (param->handshake_request.version_major == RLAUNCH_VER_MAJOR &&
-		param->handshake_request.version_major == RLAUNCH_VER_MAJOR)
+		param->handshake_request.version_minor == RLAUNCH_VER_MINOR)
 	{
 		if (PEER_INIT_TARGET == self->init_mode)
 		{
 			invoke_action(self, PEER_ACTION_TRANSMIT_HANDSHAKE, NULL);
+
+			/* invoke_action() returns void; a failed enqueue is reported by
+			 * on_transmit_handshake() moving us to PEER_ERROR. Announcing
+			 * PEER_CONNECTED over that would fire on_connected for a peer whose
+			 * handshake never went out, leaving the other end waiting forever. */
+			if (PEER_ERROR == self->state)
+				return;
 		}
 		peer_set_state(self, PEER_CONNECTED);
 	}
