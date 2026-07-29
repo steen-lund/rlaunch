@@ -1982,7 +1982,23 @@ int rl_amigafs_process_network_message(rl_amigafs_t *self, const rl_msg_t *msg)
 	return status;
 }
 
-static void action_die(rl_amigafs_t *self, struct DosPacket* packet) {}
+/*
+   ACTION_DIE
+
+Purpose: ask the handler to shut itself down
+dp_Res1 - BOOL (DOSTRUE if the handler agreed to go away)
+dp_Res2 - CODE (failure code if dp_Res1 = DOSFALSE)
+*/
+static void action_die(rl_amigafs_t *self, struct DosPacket* packet)
+{
+	RL_LOG_DEBUG(("action_die"));
+	/* Refuse: the connection is torn down by the peer loop, not from here.
+	 * Flagging the filesystem for teardown and replying DOSTRUE is what a
+	 * shutdown driven from the Amiga side would need. */
+	packet->dp_Res1 = DOSFALSE;
+	packet->dp_Res2 = ERROR_OBJECT_IN_USE;
+	reply_to_packet(self, packet);
+}
 
 /*
    ACTION_CURRENT_VOLUME

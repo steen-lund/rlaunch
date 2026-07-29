@@ -691,14 +691,17 @@ UTEST(amigafs, a_die_packet_is_answered)
 {
 	fs_fixture_t fix;
 	test_packet_t tp;
-
-	UTEST_SKIP("#17: ACTION_DIE never replies, so the sender waits forever");
+	struct DosPacket *packet;
 
 	fixture_init(&fix);
-	make_packet(&fix, &tp, ACTION_DIE);
+	packet = make_packet(&fix, &tp, ACTION_DIE);
 	send_packet(&fix, &tp);
 
+	/* Whoever sent it blocks on its reply port, so refusing still has to be
+	 * said out loud. */
 	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ((LONG)DOSFALSE, packet->dp_Res1);
+	ASSERT_EQ((LONG)ERROR_OBJECT_IN_USE, packet->dp_Res2);
 
 	fixture_destroy(&fix);
 }
