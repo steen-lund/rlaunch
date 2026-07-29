@@ -27,6 +27,21 @@ which is pulled and patched up on the first configure):
     cmake -B build-amiga -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/amiga-vbcc.cmake
     cmake --build build-amiga
 
+TESTS
+===============================================================================
+
+The host build produces rl-test, covering the file server, the wire protocol
+codecs and the string/format utilities:
+
+    ctest --test-dir build --output-on-failure
+
+Tests assert correct behaviour, so those covering a still-open bug begin with
+UTEST_SKIP("#N: ...") to keep the build green. Removing that one line is how
+you check a fix: the test should go from skipped to passing.
+
+amigafs.c is Amiga-only and has no coverage here -- it needs either fake
+Exec/DOS headers so it can be driven on the host, or a real emulator.
+
 INSTALLATION
 ===============================================================================
 

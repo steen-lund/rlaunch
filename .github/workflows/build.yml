@@ -21,6 +21,8 @@ jobs:
       run: |
         cmake -B build -DCMAKE_BUILD_TYPE=Release
         cmake --build build -j 4
+    - name: test
+      run: ctest --test-dir build --output-on-failure
     - name: build amiga
       run: |
         cmake -B build-amiga -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/amiga-vbcc.cmake
@@ -48,6 +50,8 @@ jobs:
       run: |
         cmake -B build -DCMAKE_BUILD_TYPE=Release
         cmake --build build -j 4
+    - name: test
+      run: ctest --test-dir build --output-on-failure
     - uses: actions/download-artifact@v4
       with:
         name: rlaunch-amiga
@@ -71,6 +75,8 @@ jobs:
       run: |
         cmake -B build
         cmake --build build --config Release
+    - name: test
+      run: ctest --test-dir build -C Release --output-on-failure
     - uses: actions/download-artifact@v4
       with:
         name: rlaunch-amiga

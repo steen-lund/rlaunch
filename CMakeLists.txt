@@ -35,4 +35,11 @@ target_link_libraries(rl-target PRIVATE common)
 if(NOT AMIGA)
 	add_executable(rl-controller src/controller.c src/file_server.c)
 	target_link_libraries(rl-controller PRIVATE common)
+
+	# rlaunch_test.c #includes file_server.c to reach its statics, so it must
+	# not be linked in a second time.
+	enable_testing()
+	add_executable(rl-test test/rlaunch_test.c)
+	target_link_libraries(rl-test PRIVATE common)
+	add_test(NAME rlaunch COMMAND rl-test)
 endif()
