@@ -1285,6 +1285,21 @@ complete_read(rl_amigafs_t *self, rl_pending_operation_t *op, const rl_msg_t *ms
 	 * buffer, and the rest should end up in the buffer space to be used for
 	 * future reads. */
 	slice_amount = RL_MIN_MACRO(amount_left, amount_read);
+
+	/* We always ask for at least sizeof(handle->buffer) bytes, so a conforming
+	 * server can never leave us more surplus than the buffer holds. Anything
+	 * larger is a protocol violation; fail the read instead of overflowing. */
+	if (amount_read - slice_amount > sizeof(handle->buffer))
+	{
+		RL_LOG_WARNING(("read answer of %u bytes overflows the %u byte handle buffer",
+					amount_read, (rl_uint32) sizeof(handle->buffer)));
+		packet->dp_Res1 = 0;
+		packet->dp_Res2 = ERROR_SEEK_ERROR;
+		reply_to_packet(self, packet);
+		unlink_pending(self, op);
+		return;
+	}
+
 	rl_memcpy(op->detail.read.destination, msg->read_file_answer.data.base, slice_amount);
 
 	/* Update the handle's virtual file position. TODO: 64-bit filepos. */
