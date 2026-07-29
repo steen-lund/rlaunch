@@ -201,8 +201,6 @@ UTEST(protocol, decode_string_rejects_payload_without_room_for_terminator)
 	int size = 4;
 	const char *decoded = NULL;
 
-	UTEST_SKIP("#4: rl_decode_string off-by-one reads one byte past the message");
-
 	ASSERT_NE(0, rl_decode_string(&cursor, &size, &decoded));
 }
 

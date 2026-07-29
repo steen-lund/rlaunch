@@ -10,8 +10,10 @@ int rl_decode_string(const unsigned char **cursor, int *size, const char **resul
 		return -1;
 
 	my_len = (unsigned int) **cursor;
-	
-	if (my_len >= *size)
+
+	/* The encoding is length byte + payload + NUL, so my_len + 2 bytes must
+	 * fit; my_len is at most 255, so the addition cannot overflow. */
+	if (my_len + 2 > *size)
 		return -1;
 
 	if ((*cursor)[1 + my_len])
