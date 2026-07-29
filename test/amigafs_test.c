@@ -38,6 +38,10 @@ UTEST_MAIN();
 
 void rl_test_reset_dos_entries(void);
 
+/* util.c's host allocator: -1 never fails, N fails the Nth allocation from
+ * now on. The only way into this file's out-of-memory paths. */
+extern int rl_test_alloc_fail_in;
+
 #define TEST_REQUIRE(expr)                                                     \
 	do {                                                                       \
 		if (!(expr)) {                                                         \
@@ -269,6 +273,87 @@ UTEST(amigafs, a_locate_answer_completes_the_pending_packet)
 	ASSERT_NE(0, packet->dp_Res1);
 	ASSERT_EQ(0, packet->dp_Res2);
 	ASSERT_TRUE(BADDR(packet->dp_Res1) != NULL);
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, a_failed_root_lock_does_not_free_a_stale_pending_op)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *root;
+	char name[64];
+	rl_msg_t request;
+
+	fixture_init(&fix);
+	root = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+	ASSERT_TRUE(root != NULL);
+
+	/* An empty name against the root lock resolves to the root itself, which
+	 * is answered locally -- no pending op is ever allocated on this path. */
+	packet = make_packet(&fix, &tp, ACTION_LOCATE_OBJECT);
+	packet->dp_Arg1 = (LONG)MKBADDR(root);
+	packet->dp_Arg2 = (LONG)make_bstr(name, "");
+	packet->dp_Arg3 = ACCESS_READ;
+
+	/* The next allocation is the root lock. Failing it takes the error path,
+	 * which used to free whatever the uninitialized pending_op pointed at. */
+	rl_test_alloc_fail_in = 0;
+	send_packet(&fix, &tp);
+	rl_test_alloc_fail_in = -1;
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ(0, packet->dp_Res1);
+	ASSERT_EQ((LONG)ERROR_NO_FREE_STORE, packet->dp_Res2);
+
+	/* Handled locally, so the controller should not have heard about it. */
+	ASSERT_EQ(-1, pop_request(&fix, &request));
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, a_locate_answer_we_cannot_hold_gives_the_handle_back)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *root;
+	char name[64];
+	rl_msg_t request, answer, close_request;
+
+	fixture_init(&fix);
+	root = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+	ASSERT_TRUE(root != NULL);
+
+	packet = make_packet(&fix, &tp, ACTION_LOCATE_OBJECT);
+	packet->dp_Arg1 = (LONG)MKBADDR(root);
+	packet->dp_Arg2 = (LONG)make_bstr(name, "hello.txt");
+	packet->dp_Arg3 = ACCESS_READ;
+	send_packet(&fix, &tp);
+
+	ASSERT_EQ(0, pop_request(&fix, &request));
+
+	RL_MSG_INIT(answer, RL_MSG_OPEN_HANDLE_ANSWER);
+	answer.open_handle_answer.hdr_in_reply_to = request.open_handle_request.hdr_sequence_num;
+	answer.open_handle_answer.handle = 7;
+	answer.open_handle_answer.type = RL_NODE_TYPE_FILE;
+	answer.open_handle_answer.size = 11;
+
+	/* Fail the lock allocation so the answer arrives with nowhere to go. The
+	 * server handle is already open at this point. */
+	rl_test_alloc_fail_in = 0;
+	rl_amigafs_process_network_message(&fix.fs, &answer);
+	rl_test_alloc_fail_in = -1;
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ(0, packet->dp_Res1);
+	ASSERT_EQ((LONG)ERROR_NO_FREE_STORE, packet->dp_Res2);
+
+	/* Without this the handle stays open in the server's fixed table forever. */
+	ASSERT_EQ(0, pop_request(&fix, &close_request));
+	ASSERT_EQ(RL_MSG_CLOSE_HANDLE_REQUEST, (int)rl_msg_kind_of(&close_request));
+	ASSERT_EQ(7u, (unsigned)close_request.close_handle_request.handle);
 
 	fixture_destroy(&fix);
 }

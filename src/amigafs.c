@@ -905,7 +905,9 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 	struct FileLock *result_lock = NULL;
 	char full_path[RL_AMIGA_PATH_MAX];
 	rl_client_handle_t *handle = NULL;
-	rl_pending_operation_t *pending_op;
+	/* The root-lock path below can reach the error label before any pending
+	 * op exists, and the label frees whatever this points at. */
+	rl_pending_operation_t *pending_op = NULL;
 	rl_msg_t msg;
 
     RL_LOG_DEBUG(("LOCATE_OBJECT: directory=\"%d\", name=\"%Q\" mode=%d (%s)",
@@ -930,7 +932,10 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 	{
 		result_lock = rl_amigafs_alloc_root_lock(fs, mode);
 		if (!result_lock)
+		{
+			error_code = ERROR_NO_FREE_STORE;
 			goto error;
+		}
 		RL_LOG_DEBUG(("Returning lock: %p for handle id %d", result_lock, HANDLE_FROM_LOCK(result_lock)->handle_id));
 		packet->dp_Res1 = MKBADDR(result_lock);
 		packet->dp_Res2 = 0;
@@ -996,8 +1001,17 @@ static void complete_locate_object(rl_amigafs_t *fs, rl_pending_operation_t *op,
 	}
 	else
 	{
+		rl_msg_t close_msg;
+
 		op->input_packet->dp_Res1 = 0;
 		op->input_packet->dp_Res2 = ERROR_NO_FREE_STORE;
+
+		/* Nobody is left holding the handle the server just opened for us, and
+		 * its table of them is fixed size -- hand it back. */
+		RL_MSG_INIT(close_msg, RL_MSG_CLOSE_HANDLE_REQUEST);
+		close_msg.close_handle_request.hdr_sequence_num = fs->seqno++;
+		close_msg.close_handle_request.handle = msg->open_handle_answer.handle;
+		peer_transmit_message(fs->peer, &close_msg);
 	}
 
 	reply_to_packet(fs, op->input_packet);

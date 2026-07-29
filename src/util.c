@@ -446,15 +446,42 @@ int rl_init_alloc(void) { return 0; }
 
 void rl_fini_alloc(void) { }
 
+/*
+ * Out-of-memory injection for the tests. Most of the error paths in this
+ * codebase can only be reached by a failing allocation, so without a way to
+ * fail one on demand they cannot be covered at all. -1 never fails; N fails
+ * the Nth allocation from now on and then goes back to never failing.
+ *
+ * ponytail: host builds only -- the Amiga branch above is untouched, so the
+ * shipping target carries none of this.
+ */
+int rl_test_alloc_fail_in = -1;
+
+static int alloc_fails(void)
+{
+	if (rl_test_alloc_fail_in < 0)
+		return 0;
+
+	return 0 == rl_test_alloc_fail_in--;
+}
+
 void *rl_alloc_sized(size_t sz)
 {
-	void *p = malloc(sz);
+	void *p;
+
+	if (alloc_fails())
+		return NULL;
+
+	p = malloc(sz);
 	RL_LOG_DEBUG(("rl_alloc_sized(%d) => %p", sz, p));
 	return p;
 }
 
 void *rl_alloc_sized_and_clear(size_t sz)
 {
+	if (alloc_fails())
+		return NULL;
+
 	return calloc(sz, 1);
 }
 
