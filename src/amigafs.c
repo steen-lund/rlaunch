@@ -46,8 +46,12 @@ static const char *rl_client_handle_type_name(rl_client_handle_type_t type)
 /*
  * Given an input path and an optional parent directory, compute the
  * corresponding absolute path on the server.
+ *
+ * Returns 0 on success, or a DOS error code if the name does not fit. Names
+ * are rejected rather than truncated: a truncated path would silently resolve
+ * to the wrong file on the server.
  */
-static void normalize_object_path(
+static LONG normalize_object_path(
 	rl_amigafs_t *fs,
 	char *buffer,
 	size_t buffer_size,
@@ -55,8 +59,8 @@ static void normalize_object_path(
 	const void *object_name_bstr)
 {
 	char item_path[RL_AMIGA_PATH_MAX];
-	char full_path[RL_AMIGA_PATH_MAX];
 	rl_client_handle_t *handle;
+	size_t name_len = BSTR_LEN(object_name_bstr);
 
 	/*
 	 * Establish a node to start "locating" from--if we don't have a lock,
@@ -67,8 +71,12 @@ static void normalize_object_path(
 	else
 		handle = HANDLE_FROM_LOCK(dir_lock);
 
-	rl_memcpy(item_path, BSTR_PTR(object_name_bstr), BSTR_LEN(object_name_bstr));
-	item_path[BSTR_LEN(object_name_bstr)] = '\0';
+	/* A BSTR length byte goes up to 255, item_path is RL_AMIGA_PATH_MAX. */
+	if (name_len >= sizeof(item_path))
+		return ERROR_LINE_TOO_LONG;
+
+	rl_memcpy(item_path, BSTR_PTR(object_name_bstr), name_len);
+	item_path[name_len] = '\0';
 
 	/*
 	 * If the name is absolute (starts with a device name followed by a
@@ -85,13 +93,23 @@ static void normalize_object_path(
 
 	if (&fs->root_handle != handle)
 	{
+		/* Joining adds a separator, so check the total before formatting:
+		 * rl_format_msg truncates silently. */
+		if (rl_strlen(handle->path) + 1 + rl_strlen(item_path) >= buffer_size)
+			return ERROR_LINE_TOO_LONG;
+
 		RL_LOG_DEBUG(("normalize: path '%s' relative to parent '%s'", item_path, handle->path));
 		rl_format_msg(buffer, buffer_size, "%s/%s", handle->path, item_path);
 	}
 	else
 	{
+		if (rl_strlen(item_path) >= buffer_size)
+			return ERROR_LINE_TOO_LONG;
+
 		rl_format_msg(buffer, buffer_size, "%s", item_path);
 	}
+
+	return 0;
 }
 
 static void dump_pending_ops(rl_amigafs_t *fs)
@@ -669,7 +687,19 @@ static void action_examine_object(rl_amigafs_t *fs, struct DosPacket *packet)
 		rl_memset(fib, 0, sizeof(*fib));
 		fib->fib_DiskKey = 0L;
 		fib->fib_EntryType = fib->fib_DirEntryType = ST_ROOT;
-		rl_memcpy(fib->fib_FileName, BADDR(fs->device_list->dl_Name), BSTR_LEN(BADDR(fs->device_list->dl_Name))+1);
+		{
+			/* dl_Name is a BSTR whose length byte goes up to 255; fib_FileName
+			 * holds a size byte, the name and a terminator. */
+			const void *volume_name = BADDR(fs->device_list->dl_Name);
+			size_t volume_len = BSTR_LEN(volume_name);
+
+			if (volume_len > sizeof(fib->fib_FileName) - 2)
+				volume_len = sizeof(fib->fib_FileName) - 2;
+
+			fib->fib_FileName[0] = (char) volume_len;
+			rl_memcpy(fib->fib_FileName + 1, BSTR_PTR(volume_name), volume_len);
+			fib->fib_FileName[volume_len + 1] = '\0';
+		}
 		fib->fib_Protection = 0;
 		fib->fib_Size = 0;
 		fib->fib_NumBlocks = 0;
@@ -884,8 +914,15 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 				(int) mode,
 				mode == -1 ? "SHARED_LOCK/ACCESS_READ" : "EXCLUSIVE_LOCK/ACCESS_WRITE"));
 
-	/* Clean up and normalize the path string. */
-	normalize_object_path(fs, full_path, sizeof(full_path), dir_lock, object_name_bstr);
+	/* Clean up and normalize the path string. Bail out before any pending op
+	 * exists, so the error path below has nothing to unwind. */
+	if (0 != (error_code = normalize_object_path(fs, full_path, sizeof(full_path), dir_lock, object_name_bstr)))
+	{
+		packet->dp_Res1 = 0;
+		packet->dp_Res2 = error_code;
+		reply_to_packet(fs, packet);
+		return;
+	}
 	RL_LOG_DEBUG(("Normalized lookup path: '%s'", full_path));
 
 	/* If the client really wanted the root node, we can return that immediately. */
@@ -940,7 +977,16 @@ static void complete_locate_object(rl_amigafs_t *fs, rl_pending_operation_t *op,
 	const rl_client_handle_type_t type =
 		RL_NODE_TYPE_DIRECTORY == msg->open_handle_answer.type ? RL_HANDLE_DIR : RL_HANDLE_FILE;
 
-	normalize_object_path(fs, full_path, sizeof(full_path), dir_lock, object_name_bstr);
+	/* ponytail: cannot fail here -- action_locate_object normalized the same
+	 * inputs before putting the request on the wire. */
+	if (0 != normalize_object_path(fs, full_path, sizeof(full_path), dir_lock, object_name_bstr))
+	{
+		packet->dp_Res1 = 0;
+		packet->dp_Res2 = ERROR_LINE_TOO_LONG;
+		reply_to_packet(fs, packet);
+		unlink_pending(fs, op);
+		return;
+	}
 
 	/* FIXME: The input path here is bogus. */
 	if (NULL != (lock = allocate_lock(fs, type, msg->open_handle_answer.handle, 0, full_path, msg->open_handle_answer.size)))
@@ -1098,7 +1144,7 @@ static void action_parent(rl_amigafs_t *fs, struct DosPacket *packet)
 	{
 		/* Take the parent handle's path and drop the last path component. */
 		int len;
-		char parent_path[108];
+		char parent_path[RL_AMIGA_PATH_MAX];
 
 		rl_string_copy(sizeof(parent_path), parent_path, handle->path);
 		len = (int) rl_strlen(parent_path);

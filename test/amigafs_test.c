@@ -201,6 +201,42 @@ UTEST(amigafs, locate_object_asks_the_controller_for_the_path)
 	fixture_destroy(&fix);
 }
 
+UTEST(amigafs, locate_object_rejects_a_name_that_does_not_fit)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *root;
+	/* MKBADDR() drops the low two bits, so BSTR storage has to be aligned. */
+	LONG storage[(257 + sizeof(LONG) - 1) / sizeof(LONG)];
+	char name[256];
+	rl_msg_t request;
+
+	fixture_init(&fix);
+	root = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+	ASSERT_TRUE(root != NULL);
+
+	/* The longest name a BSTR can carry, well past the 108-byte path buffer
+	 * the filesystem copies it into. */
+	memset(name, 'a', sizeof(name) - 1);
+	name[sizeof(name) - 1] = '\0';
+
+	packet = make_packet(&fix, &tp, ACTION_LOCATE_OBJECT);
+	packet->dp_Arg1 = (LONG)MKBADDR(root);
+	packet->dp_Arg2 = (LONG)make_bstr((char *)storage, name);
+	packet->dp_Arg3 = ACCESS_READ;
+	send_packet(&fix, &tp);
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ(0, packet->dp_Res1);
+	ASSERT_NE(0, packet->dp_Res2);
+
+	/* Nothing should have been asked of the controller. */
+	ASSERT_EQ(-1, pop_request(&fix, &request));
+
+	fixture_destroy(&fix);
+}
+
 UTEST(amigafs, a_locate_answer_completes_the_pending_packet)
 {
 	fs_fixture_t fix;
