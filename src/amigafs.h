@@ -43,6 +43,10 @@ typedef struct rl_client_handle_tag
 	rl_uint32 handle_id;
 	rl_client_handle_type_t type;
 
+	/* Locks duplicated with DupLock() share this handle; the server-side id is
+	 * only given back when the last of them is freed. */
+	rl_uint32 refcount;
+
 	/* Current read position. */
 	rl_uint32 offset_lo;
 	rl_uint32 offset_hi;

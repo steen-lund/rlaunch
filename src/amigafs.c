@@ -306,6 +306,7 @@ static struct FileLock *allocate_lock(
 
 	handle->handle_id = handle_id;
 	handle->type = type;
+	handle->refcount = 1;
 	handle->size_lo = size;
 	rl_string_copy(sizeof(handle->path), handle->path, name);
 
@@ -324,6 +325,27 @@ error:
 		RL_FREE_TYPED(rl_client_handle_t, lock);
 
 	return NULL;
+}
+
+/* A second lock on an object already locked: both share the one server handle,
+ * so only the last one freed may hand the id back. */
+static struct FileLock *duplicate_lock(rl_amigafs_t *fs, rl_client_handle_t *handle, LONG access)
+{
+	struct FileLock *lock;
+
+   	if (NULL == (lock = RL_ALLOC_TYPED_ZERO(struct FileLock)))
+		return NULL;
+
+	++handle->refcount;
+
+	RL_LOG_DEBUG(("Allocated lock %p sharing handle id %d (%p), refcount %d",
+				lock, handle->handle_id, handle, (int) handle->refcount));
+
+	lock->fl_Access = access;
+	lock->fl_Key = (LONG) handle;
+	lock->fl_Task = fs->device_port;
+	lock->fl_Volume = MKBADDR(fs->device_list);
+	return lock;
 }
 
 /* Ask the server to open `path` and answer the pending op with the handle. */
@@ -361,8 +383,9 @@ void rl_amigafs_free_lock(rl_amigafs_t *fs, struct FileLock *lock)
 
 	RL_ASSERT(handle);
 
-	/* Don't free the device handle (it lives inside the amigafs struct). */
-	if (RL_HANDLE_DEVICE != handle->type)
+	/* Don't free the device handle (it lives inside the amigafs struct), and
+	 * don't close a handle a duplicate of this lock is still using. */
+	if (RL_HANDLE_DEVICE != handle->type && 0 == --handle->refcount)
 	{
 		transmit_close_handle(fs, handle->handle_id);
 		RL_FREE_TYPED(rl_client_handle_t, handle);
@@ -1124,7 +1147,7 @@ static void action_copy_dir(rl_amigafs_t *fs, struct DosPacket *packet)
 		if (RL_HANDLE_DEVICE == handle->type)
 			copy = rl_amigafs_alloc_root_lock(fs, SHARED_LOCK);
 		else
-			copy = allocate_lock(fs, handle->type, handle->handle_id, SHARED_LOCK, handle->path, handle->size_lo);
+			copy = duplicate_lock(fs, handle, SHARED_LOCK);
 
 		packet->dp_Res1 = MKBADDR(copy);
 

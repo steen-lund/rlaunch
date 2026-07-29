@@ -519,6 +519,40 @@ UTEST(amigafs, parent_of_a_null_lock_is_rejected)
 	fixture_destroy(&fix);
 }
 
+UTEST(amigafs, a_duplicated_lock_keeps_the_handle_until_both_are_freed)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *lock, *copy;
+	rl_msg_t request;
+
+	fixture_init(&fix);
+	lock = locate_lock(&fix, "dir/hello.txt", 7, RL_NODE_TYPE_FILE);
+
+	packet = make_packet(&fix, &tp, ACTION_COPY_DIR);
+	packet->dp_Arg1 = (LONG)MKBADDR(lock);
+	send_packet(&fix, &tp);
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_NE(0, packet->dp_Res1);
+	copy = (struct FileLock *)BADDR(packet->dp_Res1);
+	ASSERT_TRUE(copy != lock);
+
+	/* Both locks name the same server handle, so freeing one of them must not
+	 * close it -- the survivor would then read whatever file the server put in
+	 * that slot next. */
+	rl_amigafs_free_lock(&fix.fs, copy);
+	ASSERT_EQ(-1, pop_request(&fix, &request));
+
+	rl_amigafs_free_lock(&fix.fs, lock);
+	ASSERT_EQ(0, pop_request(&fix, &request));
+	ASSERT_EQ(RL_MSG_CLOSE_HANDLE_REQUEST, (int)rl_msg_kind_of(&request));
+	ASSERT_EQ(7u, (unsigned)request.close_handle_request.handle);
+
+	fixture_destroy(&fix);
+}
+
 UTEST(amigafs, a_die_packet_is_answered)
 {
 	fs_fixture_t fix;
