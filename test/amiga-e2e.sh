@@ -47,7 +47,8 @@ cp "$AMIGA_BUILD/rl-payload" "$WORK/fsroot/rl-payload"
 printf 'hello from the host' > "$WORK/fsroot/hello.txt"
 
 echo "== booting AROS =="
-LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -s "-screen 0 800x600x24" \
+# -a picks a free display number rather than failing on a stale lock file.
+LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 800x600x24" \
 	amiberry -G \
 	-r "$ROMS/aros-rom.bin" -K "$ROMS/aros-ext.bin" \
 	-s cpu_model=68020 -s cachesize=8192 \

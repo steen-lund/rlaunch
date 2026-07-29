@@ -342,8 +342,6 @@ UTEST(fix_path, rejects_traversal_outside_the_served_root)
 {
 	char dest[260];
 
-	UTEST_SKIP("#10: fix_path does not reject '..' components");
-
 	ASSERT_NE(0, fix_path(dest, sizeof(dest), "../../etc/passwd", "/srv/root"));
 }
 
@@ -351,8 +349,6 @@ UTEST(fix_path, rejects_input_that_does_not_fit)
 {
 	char dest[64];
 	char overlong[300];
-
-	UTEST_SKIP("#9: fix_path silently truncates instead of failing");
 
 	memset(overlong, 'a', sizeof(overlong) - 1);
 	overlong[sizeof(overlong) - 1] = '\0';
@@ -500,11 +496,6 @@ UTEST(file_server, closing_a_handle_releases_the_descriptor)
 	int raw;
 #endif
 
-#if defined(RL_POSIX)
-	/* The Win32 branch closes correctly. */
-	UTEST_SKIP("#6: the POSIX close() guard is inverted, so every descriptor leaks");
-#endif
-
 	test_controller_init(&ctl, root, sizeof(root));
 	write_file(root, "hello.txt", "hi");
 	test_peer_init(&peer, &ctl);
@@ -534,8 +525,6 @@ UTEST(file_server, writing_to_an_unknown_handle_replies_with_an_error)
 	peer_t peer;
 	rl_msg_t request, reply;
 	char root[256];
-
-	UTEST_SKIP("#7: write_file_request never NULL-checks the handle and answers success");
 
 	test_controller_init(&ctl, root, sizeof(root));
 	test_peer_init(&peer, &ctl);

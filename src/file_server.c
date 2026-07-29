@@ -72,28 +72,77 @@ static rl_filehandle_t *get_handle_from_id(rl_controller_t *self, peer_t *peer, 
 	}
 }
 
+/*
+ * Does the path try to climb out of the directory being served? Anything with
+ * a ".." component does, as does an absolute path, which would ignore the root
+ * entirely. The input arrives from the network, so this is a trust boundary.
+ */
+static int escapes_root(const char *input)
+{
+	const char *cursor = input;
+
+	if ('/' == input[0] || '\\' == input[0])
+		return 1;
+
+	/* A drive or device prefix ("c:", "TBL0:") is absolute too. */
+	if (NULL != rl_strchr(input, ':'))
+		return 1;
+
+	for (;;)
+	{
+		if ('.' == cursor[0] && '.' == cursor[1] &&
+			('\0' == cursor[2] || '/' == cursor[2] || '\\' == cursor[2]))
+			return 1;
+
+		/* Advance to just past the next separator, if any. */
+		while ('\0' != *cursor && '/' != *cursor && '\\' != *cursor)
+			++cursor;
+
+		if ('\0' == *cursor)
+			return 0;
+
+		++cursor;
+	}
+}
+
 static int fix_path(char *dest, size_t dest_size, const char *input, const char *root_path)
 {
-	/* FIXME: Make something proper of this. */
+	size_t root_len = rl_strlen(root_path);
+	size_t input_len = rl_strlen(input);
+
+	if (escapes_root(input))
+		return 1;
+
+	/* rl_format_msg() truncates silently, which would resolve a long path to
+	 * the wrong file. Refuse instead; +2 covers the separator and the null. */
+	if (root_len + input_len + 2 > dest_size)
+		return 1;
+
 #ifdef RL_WIN32
-	char backslash_path[128];
-	size_t i;
-
-	for (i = 0; i < sizeof(backslash_path)-1; ++i)
 	{
-		char ch = input[i];
-		if ('/' == ch)
-			ch = '\\';
-		backslash_path[i] = ch;
-	}
-	backslash_path[i] = '\0';
+		char backslash_path[260];
+		size_t i;
 
-	rl_format_msg(dest, dest_size, "%s\\%s", root_path, backslash_path);
-	return 0;
+		if (input_len >= sizeof(backslash_path))
+			return 1;
+
+		/* Stop at the terminator: the input is a decoded string sitting in the
+		 * receive buffer, so reading past it is a remote-driven over-read. */
+		for (i = 0; i < input_len; ++i)
+		{
+			char ch = input[i];
+			if ('/' == ch)
+				ch = '\\';
+			backslash_path[i] = ch;
+		}
+		backslash_path[i] = '\0';
+
+		rl_format_msg(dest, dest_size, "%s\\%s", root_path, backslash_path);
+	}
 #else
 	rl_format_msg(dest, dest_size, "%s/%s", root_path, input);
-	return 0;
 #endif
+	return 0;
 }
 
 static rl_filehandle_t *make_handle(rl_controller_t *self, const char *path, int mode, rl_uint32 *error_out)
@@ -356,11 +405,23 @@ static int close_handle_request(peer_t *peer, const rl_msg_t *msg)
 		return reply_with_error(peer, msg, RL_NETERR_INVALID_VALUE);
 
 #if defined(RL_WIN32)
-	if (INVALID_HANDLE_VALUE != handle->handle)
+	if (handle->find_handle)
+	{
+		FindClose(handle->find_handle);
+		handle->find_handle = NULL;
+	}
+	if (INVALID_HANDLE_VALUE != handle->handle && NULL != handle->handle)
 		CloseHandle(handle->handle);
 	handle->handle = NULL;
 #elif defined(RL_POSIX)
-	if (-1 == handle->handle)
+	if (handle->dir_handle)
+	{
+		closedir(handle->dir_handle);
+		handle->dir_handle = NULL;
+	}
+	/* 0 marks a free slot and -1 a directory; anything else is a real
+	 * descriptor and has to be given back. */
+	if (0 != handle->handle && -1 != handle->handle)
 		close(handle->handle);
 	handle->handle = 0;
 #else
@@ -593,7 +654,9 @@ static int write_file_request(peer_t *peer, const rl_msg_t *msg)
 	const rl_msg_write_file_request_t * request;
 
 	request	= &msg->write_file_request;
-	handle = get_handle_from_id(self, peer, request->handle);
+
+	if (NULL == (handle = get_handle_from_id(self, peer, request->handle)))
+		return reply_with_error(peer, msg, RL_NETERR_INVALID_VALUE);
 
 	RL_LOG_DEBUG(("write %d bytes against %s", request->data.length, handle->native_path));
 
