@@ -39,8 +39,19 @@ Tests assert correct behaviour, so those covering a still-open bug begin with
 UTEST_SKIP("#N: ...") to keep the build green. Removing that one line is how
 you check a fix: the test should go from skipped to passing.
 
-amigafs.c is Amiga-only and has no coverage here -- it needs either fake
-Exec/DOS headers so it can be driven on the host, or a real emulator.
+There is also an end-to-end test that boots AROS m68k under the Amiberry
+emulator, runs a real rl-target on it and drives it with the host controller:
+
+    test/amiga-e2e.sh build build-amiga
+
+It needs an amd64 Linux host with docker (for the amiga build) and sudo (to
+install Amiberry). No Kickstart ROM and no Workbench install are involved: the
+Amiberry package ships AROS ROMs, and bsdsocket.library is emulated, so the
+target's TCP port appears as an ordinary listening socket on the host. CI runs
+this job non-blocking until it has proven stable.
+
+amigafs.c has no unit coverage -- only whatever the end-to-end test happens to
+exercise. Driving it properly on the host would need fake Exec/DOS headers.
 
 INSTALLATION
 ===============================================================================

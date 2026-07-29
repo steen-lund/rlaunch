@@ -41,6 +41,26 @@ jobs:
         name: rlaunch-linux
         path: dist
 
+  # Boots AROS m68k under Amiberry and drives a real target with the host
+  # controller. Non-blocking until it has proven stable -- an emulator boot is
+  # the flakiest thing in this workflow.
+  AmigaE2E:
+    needs: Linux
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v3
+    - name: build host
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build -j 4
+    - name: build amiga
+      run: |
+        cmake -B build-amiga -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/amiga-vbcc.cmake
+        cmake --build build-amiga -j 4
+    - name: end-to-end against emulated amiga
+      run: test/amiga-e2e.sh build build-amiga
+
   macOS:
     needs: Linux
     runs-on: macos-latest

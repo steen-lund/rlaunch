@@ -32,6 +32,11 @@ endif()
 add_executable(rl-target src/target.c $<$<BOOL:${AMIGA}>:src/amigafs.c>)
 target_link_libraries(rl-target PRIVATE common)
 
+if(AMIGA)
+	# Payload for the end-to-end test; rl-controller launches it on the Amiga.
+	add_executable(rl-payload test/amiga_payload.c)
+endif()
+
 if(NOT AMIGA)
 	add_executable(rl-controller src/controller.c src/file_server.c)
 	target_link_libraries(rl-controller PRIVATE common)
