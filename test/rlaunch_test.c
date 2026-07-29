@@ -10,6 +10,13 @@
  * one line is how you verify a fix.
  */
 
+/* file_server.c includes <windows.h>, which drags in the legacy winsock.h and
+ * then collides with the winsock2.h that socket_includes.h needs. Keep the
+ * production include order and tell windows.h to leave sockets alone instead. */
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 /* file_server.c ships no header and everything interesting in it is static, so
  * pull the whole translation unit in rather than punching holes in it. rl-test
  * must therefore not also link file_server.c. */
