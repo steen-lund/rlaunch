@@ -26,6 +26,7 @@
 #define HANDLE_FROM_LOCK(lock) ((rl_client_handle_t*) (lock)->fl_Key)
 
 static LONG translate_error_code(rl_uint32 error_code);
+static LONG failed_res1(const rl_pending_operation_t *op);
 static const char* get_packet_type_name(const struct DosPacket* packet);
 static void construct_bstr(char *start, LONG max_size, const char *input);
 
@@ -1850,17 +1851,77 @@ cleanup:
 	return 1;
 }
 
-void rl_amigafs_destroy(rl_amigafs_t *self)
+/*
+ * Fail a packet that was never dispatched, so there is no pending operation to
+ * take the failure convention from. Read and write packets signal failure with
+ * -1 in dp_Res1; everything else uses DOSFALSE.
+ */
+static void fail_packet_on_teardown(rl_amigafs_t *self, struct DosPacket *packet)
 {
+	switch (packet->dp_Type)
+	{
+		case ACTION_READ:
+		case ACTION_WRITE:
+			packet->dp_Res1 = -1;
+			break;
+		default:
+			packet->dp_Res1 = DOSFALSE;
+			break;
+	}
+
+	packet->dp_Res2 = ERROR_DEVICE_NOT_MOUNTED;
+	reply_to_packet(self, packet);
+}
+
+int rl_amigafs_destroy(rl_amigafs_t *self)
+{
+	rl_pending_operation_t *op;
+	struct Message *msg;
+
 	RL_LOG_DEBUG(("rl_amigafs_destroy %p", self));
 
-	if (self->device_list)
-		unmount_volume(self->device_list);
+	/* Every pending operation holds a DOS packet whose sender is blocked
+	 * waiting for an answer the server will never send now. */
+	op = self->pending;
+	while (op)
+	{
+		rl_pending_operation_t *next = op->next;
+		op->input_packet->dp_Res1 = failed_res1(op);
+		op->input_packet->dp_Res2 = ERROR_DEVICE_NOT_MOUNTED;
+		reply_to_packet(self, op->input_packet);
+		RL_FREE_TYPED(rl_pending_operation_t, op);
+		op = next;
+	}
+	self->pending = NULL;
+
+	/* Same for anything still queued at the port: deleting it would drop
+	 * those packets and hang their senders. */
+	if (self->device_port)
+	{
+		while (NULL != (msg = GetMsg(self->device_port)))
+			fail_packet_on_teardown(self, (struct DosPacket *) msg->mn_Node.ln_Name);
+	}
+
+	/* A locked volume still points its dl_Task at our port, so neither the
+	 * DOS entry nor the port can go away yet. Report failure so the caller
+	 * knows not to free us either. */
+	if (self->device_list && 0 != unmount_volume(self->device_list))
+	{
+		RL_LOG_WARNING(("%s: volume still locked; leaving it mounted",
+					self->peer ? self->peer->ident : ""));
+		return 1;
+	}
+
+	self->device_list = NULL;
 
 	if (self->device_port)
+	{
 		DeleteMsgPort(self->device_port);
+		self->device_port = NULL;
+	}
 
 	self->peer = 0;
+	return 0;
 }
 
 int rl_amigafs_process_device_message(rl_amigafs_t *self)

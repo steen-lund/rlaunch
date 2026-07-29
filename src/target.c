@@ -354,6 +354,9 @@ static peer_t *accept_peer(rl_socket_t server_fd)
 		{
 			RL_LOG_WARNING(("couldn't init amiga fs %s for peer %s", device_name, peer->ident));
 			peer_destroy(peer);
+			/* peer_destroy() closed the socket; don't close the number again,
+			 * it may already have been handed out to another connection. */
+			peer_fd = INVALID_SOCKET;
 			goto error_cleanup;
 		}
 	}
@@ -499,8 +502,8 @@ static void serve(const rl_socket_t server_fd)
 					peer_list_remove(&peers, ci);
 
 #if defined(RL_AMIGA)
-					if (ci->userdata)
-						rl_amigafs_destroy((rl_amigafs_t *)ci->userdata);
+					if (ci->userdata && 0 == rl_amigafs_destroy((rl_amigafs_t *)ci->userdata))
+						RL_FREE_TYPED(rl_amigafs_t, ci->userdata);
 #endif
 
 					peer_destroy(ci);
@@ -519,8 +522,8 @@ static void serve(const rl_socket_t server_fd)
 			peer_t *next = ci->next;
 
 #if defined(RL_AMIGA)
-			if (ci->userdata)
-				rl_amigafs_destroy((rl_amigafs_t *)ci->userdata);
+			if (ci->userdata && 0 == rl_amigafs_destroy((rl_amigafs_t *)ci->userdata))
+				RL_FREE_TYPED(rl_amigafs_t, ci->userdata);
 #endif
 			peer_destroy(ci);
 			RL_FREE_TYPED(peer_t, ci);

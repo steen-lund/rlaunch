@@ -137,7 +137,9 @@ typedef struct rl_amigafs_tag
 
 int rl_amigafs_init(rl_amigafs_t *self, struct peer_tag *peer, const char *device_name);
 
-void rl_amigafs_destroy(rl_amigafs_t *self);
+/* Returns 0 when the file system is fully torn down and the caller may free
+ * it, non-zero when the volume is still locked and it must stay alive. */
+int rl_amigafs_destroy(rl_amigafs_t *self);
 
 int rl_amigafs_process_device_message(rl_amigafs_t *self);
 
