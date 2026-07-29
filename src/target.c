@@ -484,25 +484,19 @@ static void serve(const rl_socket_t server_fd)
 	
 		{
 			peer_t* ci;
-			peer_t *prev = NULL, *next = NULL;
 
 			for (ci = peers; ci; )
 			{
 				const int can_read = (ci->fd == new_peer_socket) || FD_ISSET(ci->fd, &read_fds);
 				const int can_write = (ci->fd == new_peer_socket) || FD_ISSET(ci->fd, &write_fds);
+				peer_t *next = ci->next;
 				int status;
-
-				prev = next;
-				next = ci->next;
 
 				status = peer_update(ci, can_read, can_write);
 
 				if (PEER_STATUS_REMOVE_ME & status)
 				{
-					if (prev)
-						prev->next = next;
-					else
-						peers = next;
+					peer_list_remove(&peers, ci);
 
 #if defined(RL_AMIGA)
 					if (ci->userdata)

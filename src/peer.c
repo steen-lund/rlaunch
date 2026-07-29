@@ -511,3 +511,19 @@ int peer_update(peer_t *self, int can_read, int can_write)
 	return self->update_result;
 }
 
+void peer_list_remove(peer_t **head, peer_t *peer)
+{
+	peer_t **link;
+
+	/* ponytail: linear scan for the predecessor - the list holds a handful of
+	 * peers. Track the previous node in the caller if that ever changes. */
+	for (link = head; *link; link = &(*link)->next)
+	{
+		if (*link == peer)
+		{
+			*link = peer->next;
+			peer->next = NULL;
+			return;
+		}
+	}
+}

@@ -590,3 +590,61 @@ UTEST(file_server, an_unhandled_request_replies_with_bad_request)
 
 	test_peer_destroy(&peer);
 }
+
+/* -------------------------------------------------------------------------
+ * peer list
+ * ------------------------------------------------------------------------- */
+
+/* Only the next pointers matter here, so skip peer_init() and its socket. */
+UTEST(peer_list, removes_a_node_from_the_middle)
+{
+	peer_t a, b, c;
+	peer_t *head = &a;
+
+	a.next = &b;
+	b.next = &c;
+	c.next = NULL;
+
+	peer_list_remove(&head, &b);
+
+	ASSERT_TRUE(head == &a);
+	ASSERT_TRUE(a.next == &c);
+	ASSERT_TRUE(c.next == NULL);
+	ASSERT_TRUE(b.next == NULL);
+}
+
+UTEST(peer_list, removes_the_head_and_the_tail)
+{
+	peer_t a, b, c;
+	peer_t *head = &a;
+
+	a.next = &b;
+	b.next = &c;
+	c.next = NULL;
+
+	peer_list_remove(&head, &a);
+	ASSERT_TRUE(head == &b);
+
+	peer_list_remove(&head, &c);
+	ASSERT_TRUE(head == &b);
+	ASSERT_TRUE(b.next == NULL);
+
+	peer_list_remove(&head, &b);
+	ASSERT_TRUE(head == NULL);
+}
+
+UTEST(peer_list, removing_a_node_that_is_not_linked_is_a_no_op)
+{
+	peer_t a, b, stray;
+	peer_t *head = &a;
+
+	a.next = &b;
+	b.next = NULL;
+	stray.next = NULL;
+
+	peer_list_remove(&head, &stray);
+
+	ASSERT_TRUE(head == &a);
+	ASSERT_TRUE(a.next == &b);
+	ASSERT_TRUE(b.next == NULL);
+}

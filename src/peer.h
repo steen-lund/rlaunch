@@ -113,4 +113,8 @@ int peer_update(peer_t* peer, int can_read, int can_write);
 
 int peer_transmit_message(peer_t* self, const union rl_msg_tag *msg);
 
+/* Unlinks peer from the intrusive list rooted at *head. No-op if it isn't in
+ * the list. Does not destroy or free the peer. */
+void peer_list_remove(peer_t **head, peer_t *peer);
+
 #endif
