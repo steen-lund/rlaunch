@@ -11,7 +11,7 @@ add_custom_command(
 	DEPENDS ${CMAKE_SOURCE_DIR}/src/mkmsg.py ${CMAKE_SOURCE_DIR}/src/rlnet.msg
 	COMMENT "Generating rlnet message codecs")
 
-# ponytail: OBJECT library, not STATIC - vbcc ships no archiver
+# OBJECT library, not STATIC - vbcc ships no archiver
 add_library(common OBJECT
 	src/util.c src/transport.c src/peer.c src/protocol.c src/socket_includes.c
 	${GEN}/rlnet.c)

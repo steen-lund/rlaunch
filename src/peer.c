@@ -532,7 +532,7 @@ void peer_list_remove(peer_t **head, peer_t *peer)
 {
 	peer_t **link;
 
-	/* ponytail: linear scan for the predecessor - the list holds a handful of
+	/* linear scan for the predecessor - the list holds a handful of
 	 * peers. Track the previous node in the caller if that ever changes. */
 	for (link = head; *link; link = &(*link)->next)
 	{

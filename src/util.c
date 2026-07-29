@@ -452,7 +452,7 @@ void rl_fini_alloc(void) { }
  * fail one on demand they cannot be covered at all. -1 never fails; N fails
  * the Nth allocation from now on and then goes back to never failing.
  *
- * ponytail: host builds only -- the Amiga branch above is untouched, so the
+ * host builds only -- the Amiga branch above is untouched, so the
  * shipping target carries none of this.
  */
 int rl_test_alloc_fail_in = -1;
