@@ -553,6 +553,140 @@ UTEST(amigafs, a_duplicated_lock_keeps_the_handle_until_both_are_freed)
 	fixture_destroy(&fix);
 }
 
+/* Reply to whatever request is outstanding with a server-side error. */
+static void fail_pending_request(fs_fixture_t *fix, const rl_msg_t *request)
+{
+	rl_msg_t answer;
+
+	RL_MSG_INIT(answer, RL_MSG_ERROR_ANSWER);
+	answer.error_answer.hdr_in_reply_to = request->read_file_request.hdr_sequence_num;
+	answer.error_answer.error_code = RL_NETERR_IO_ERROR;
+	rl_amigafs_process_network_message(&fix->fs, &answer);
+}
+
+UTEST(amigafs, a_failed_read_is_not_reported_as_end_of_file)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *lock;
+	char buffer[16];
+	rl_msg_t request;
+
+	fixture_init(&fix);
+	lock = locate_lock(&fix, "hello.txt", 7, RL_NODE_TYPE_FILE);
+
+	packet = make_packet(&fix, &tp, ACTION_READ);
+	packet->dp_Arg1 = (LONG)lock;
+	packet->dp_Arg2 = (LONG)buffer;
+	packet->dp_Arg3 = (LONG)sizeof(buffer);
+	send_packet(&fix, &tp);
+
+	ASSERT_EQ(0, pop_request(&fix, &request));
+	ASSERT_EQ(RL_MSG_READ_FILE_REQUEST, (int)rl_msg_kind_of(&request));
+	ASSERT_FALSE(packet_was_replied(&fix));
+
+	fail_pending_request(&fix, &request);
+
+	/* dp_Res1 is a byte count for READ: zero is a clean end of file, so a
+	 * caller told zero here truncates the copy without ever seeing an error. */
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ(-1, packet->dp_Res1);
+	ASSERT_NE(0, packet->dp_Res2);
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, a_failed_write_is_not_reported_as_zero_bytes_written)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *lock;
+	char buffer[16];
+	rl_msg_t request;
+
+	fixture_init(&fix);
+	lock = locate_lock(&fix, "hello.txt", 7, RL_NODE_TYPE_FILE);
+
+	memset(buffer, 'x', sizeof(buffer));
+	packet = make_packet(&fix, &tp, ACTION_WRITE);
+	packet->dp_Arg1 = (LONG)lock;
+	packet->dp_Arg2 = (LONG)buffer;
+	packet->dp_Arg3 = (LONG)sizeof(buffer);
+	send_packet(&fix, &tp);
+
+	ASSERT_EQ(0, pop_request(&fix, &request));
+	ASSERT_EQ(RL_MSG_WRITE_FILE_REQUEST, (int)rl_msg_kind_of(&request));
+
+	fail_pending_request(&fix, &request);
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ(-1, packet->dp_Res1);
+	ASSERT_NE(0, packet->dp_Res2);
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, a_read_that_never_reaches_the_wire_fails_the_same_way)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *lock;
+	char buffer[16];
+	rl_msg_t request;
+
+	fixture_init(&fix);
+	lock = locate_lock(&fix, "hello.txt", 7, RL_NODE_TYPE_FILE);
+
+	packet = make_packet(&fix, &tp, ACTION_READ);
+	packet->dp_Arg1 = (LONG)lock;
+	packet->dp_Arg2 = (LONG)buffer;
+	packet->dp_Arg3 = (LONG)sizeof(buffer);
+
+	/* The pending operation is the next allocation; failing it takes the
+	 * handler's local error path rather than any network one. */
+	rl_test_alloc_fail_in = 0;
+	send_packet(&fix, &tp);
+	rl_test_alloc_fail_in = -1;
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ(-1, packet->dp_Res1);
+	ASSERT_EQ((LONG)ERROR_NO_FREE_STORE, packet->dp_Res2);
+	ASSERT_EQ(-1, pop_request(&fix, &request));
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, a_failed_lock_still_answers_with_dosfalse)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	char name[64];
+	rl_msg_t request;
+
+	fixture_init(&fix);
+
+	packet = make_packet(&fix, &tp, ACTION_LOCATE_OBJECT);
+	packet->dp_Arg1 = 0;
+	packet->dp_Arg2 = (LONG)make_bstr(name, "hello.txt");
+	packet->dp_Arg3 = ACCESS_READ;
+	send_packet(&fix, &tp);
+
+	ASSERT_EQ(0, pop_request(&fix, &request));
+	fail_pending_request(&fix, &request);
+
+	/* The boolean and BPTR-returning actions keep zero as their failure
+	 * value; only the byte-count ones changed. */
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ(0, packet->dp_Res1);
+	ASSERT_NE(0, packet->dp_Res2);
+
+	fixture_destroy(&fix);
+}
+
 UTEST(amigafs, a_die_packet_is_answered)
 {
 	fs_fixture_t fix;

@@ -1402,7 +1402,9 @@ error:
 	if (pending_op)
 		unlink_pending(self, pending_op);
 
-	packet->dp_Res1 = DOSFALSE;
+	/* dp_Res1 is a byte count here, so failure is -1: zero would be read as a
+	 * clean end of file and the caller would silently truncate. */
+	packet->dp_Res1 = -1;
 	packet->dp_Res2 = error_code;
 	reply_to_packet(self, packet);
 }
@@ -1480,7 +1482,7 @@ complete_read(rl_amigafs_t *self, rl_pending_operation_t *op, const rl_msg_t *ms
 	{
 		RL_LOG_WARNING(("read answer of %u bytes overflows the %u byte handle buffer",
 					amount_read, (rl_uint32) sizeof(handle->buffer)));
-		packet->dp_Res1 = 0;
+		packet->dp_Res1 = -1;
 		packet->dp_Res2 = ERROR_SEEK_ERROR;
 		reply_to_packet(self, packet);
 		unlink_pending(self, op);
@@ -1526,7 +1528,7 @@ complete_read(rl_amigafs_t *self, rl_pending_operation_t *op, const rl_msg_t *ms
 
 		if (0 != transmit_read_request(self->peer, handle, op, packet->dp_Arg3 - readop_bytes_read(op, packet)))
 		{
-			packet->dp_Res1 = 0;
+			packet->dp_Res1 = -1;
 			packet->dp_Res2 = ERROR_SEEK_ERROR;
 			reply_to_packet(self, packet);
 			unlink_pending(self, op);
@@ -1577,7 +1579,8 @@ error:
 	if (pending_op)
 		unlink_pending(self, pending_op);
 
-	packet->dp_Res1 = DOSFALSE;
+	/* As for reads, dp_Res1 is a byte count and -1 is the failure signal. */
+	packet->dp_Res1 = -1;
 	packet->dp_Res2 = error_code;
 	reply_to_packet(self, packet);
 }
@@ -1919,6 +1922,24 @@ static LONG translate_error_code(rl_uint32 error_code)
 	}
 }
 
+/*
+ * The value dp_Res1 takes when a pending operation fails. READ and WRITE
+ * answer with a byte count, where zero means "nothing transferred" -- end of
+ * file to a reader -- so those two signal failure with -1 instead.
+ */
+static LONG failed_res1(const rl_pending_operation_t *op)
+{
+	switch (op->expected_answer_type)
+	{
+		case RL_MSG_READ_FILE_ANSWER:
+		case RL_MSG_WRITE_FILE_ANSWER:
+			return -1;
+
+		default:
+			return DOSFALSE;
+	}
+}
+
 int rl_amigafs_process_network_message(rl_amigafs_t *self, const rl_msg_t *msg)
 {
 	const rl_msg_kind_t msg_kind = rl_msg_kind_of(msg);
@@ -1940,7 +1961,7 @@ int rl_amigafs_process_network_message(rl_amigafs_t *self, const rl_msg_t *msg)
 	}
 	else if(msg_kind == RL_MSG_ERROR_ANSWER)
 	{
-		pending_op->input_packet->dp_Res1 = DOSFALSE;
+		pending_op->input_packet->dp_Res1 = failed_res1(pending_op);
 		pending_op->input_packet->dp_Res2 = translate_error_code(msg->error_answer.error_code);
 		reply_to_packet(self, pending_op->input_packet);
 		unlink_pending(self, pending_op);
@@ -1951,7 +1972,7 @@ int rl_amigafs_process_network_message(rl_amigafs_t *self, const rl_msg_t *msg)
 					pending_op->request_seqno,
 					rl_msg_name(msg_kind),
 					rl_msg_name(pending_op->expected_answer_type)));
-		pending_op->input_packet->dp_Res1 = DOSFALSE;
+		pending_op->input_packet->dp_Res1 = failed_res1(pending_op);
 		pending_op->input_packet->dp_Res2 = ERROR_DEVICE_NOT_MOUNTED;
 		reply_to_packet(self, pending_op->input_packet);
 		unlink_pending(self, pending_op);
