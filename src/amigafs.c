@@ -51,6 +51,19 @@ static const char *rl_client_handle_type_name(rl_client_handle_type_t type)
  * are rejected rather than truncated: a truncated path would silently resolve
  * to the wrong file on the server.
  */
+static LONG bstr_to_cstr(char *buffer, size_t buffer_size, const void *bstr)
+{
+	/* A BSTR length byte goes up to 255, so it need not fit the buffer. */
+	size_t name_len = BSTR_LEN(bstr);
+
+	if (name_len >= buffer_size)
+		return ERROR_LINE_TOO_LONG;
+
+	rl_memcpy(buffer, BSTR_PTR(bstr), name_len);
+	buffer[name_len] = '\0';
+	return 0;
+}
+
 static LONG normalize_object_path(
 	rl_amigafs_t *fs,
 	char *buffer,
@@ -60,7 +73,7 @@ static LONG normalize_object_path(
 {
 	char item_path[RL_AMIGA_PATH_MAX];
 	rl_client_handle_t *handle;
-	size_t name_len = BSTR_LEN(object_name_bstr);
+	LONG error_code;
 
 	/*
 	 * Establish a node to start "locating" from--if we don't have a lock,
@@ -71,12 +84,8 @@ static LONG normalize_object_path(
 	else
 		handle = HANDLE_FROM_LOCK(dir_lock);
 
-	/* A BSTR length byte goes up to 255, item_path is RL_AMIGA_PATH_MAX. */
-	if (name_len >= sizeof(item_path))
-		return ERROR_LINE_TOO_LONG;
-
-	rl_memcpy(item_path, BSTR_PTR(object_name_bstr), name_len);
-	item_path[name_len] = '\0';
+	if (0 != (error_code = bstr_to_cstr(item_path, sizeof(item_path), object_name_bstr)))
+		return error_code;
 
 	/*
 	 * If the name is absolute (starts with a device name followed by a
@@ -512,16 +521,22 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 	struct FileLock * const dir_lock =
 		BCPL_CAST(struct FileLock, packet->dp_Arg2);
 
-	rl_client_handle_t * const dir_handle = HANDLE_FROM_LOCK(dir_lock);
-
 	const void *filename_bstr = BCPL_CAST(const void, packet->dp_Arg3);
-	const char *filename_cstr = BSTR_PTR(filename_bstr);
+	char filename[RL_AMIGA_PATH_MAX];
+	char full_path[RL_AMIGA_PATH_MAX];
+	const char *filename_cstr = filename;
 
 	rl_pending_operation_t *pending_op = NULL;
 	LONG error_code = 0;
 
     RL_LOG_DEBUG(("FINDINPUT: directory=\"%d\", name=\"%Q\"",
-				dir_handle->handle_id, packet->dp_Arg3));
+				dir_lock ? HANDLE_FROM_LOCK(dir_lock)->handle_id : -1, packet->dp_Arg3));
+
+	/* A BSTR is not NUL-terminated; the virtual-channel test below needs a
+	 * C string. The server path is built from the BSTR by
+	 * normalize_object_path(). */
+	if (0 != (error_code = bstr_to_cstr(filename, sizeof(filename), filename_bstr)))
+		goto error;
 
 	/* Skip leading DEVICE: header that is sometimes present */
 	{
@@ -538,7 +553,7 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 	{
 		struct FileLock *file_lock;
 		struct FileHandle * const fh = BCPL_CAST(struct FileHandle, packet->dp_Arg1);
-		file_lock = allocate_lock(fs, RL_HANDLE_VIRTUAL_INPUT, RL_FILEHANDLE_VIRTUAL_INPUT, SHARED_LOCK, BSTR_PTR(filename_bstr), 0);
+		file_lock = allocate_lock(fs, RL_HANDLE_VIRTUAL_INPUT, RL_FILEHANDLE_VIRTUAL_INPUT, SHARED_LOCK, filename_cstr, 0);
 
 		if (!file_lock)
 		{
@@ -555,6 +570,11 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 		return;
 	}
 
+	/* The name is relative to the directory lock, so resolve it against that
+	 * lock before asking the server for it. */
+	if (0 != (error_code = normalize_object_path(fs, full_path, sizeof(full_path), dir_lock, filename_bstr)))
+		goto error;
+
 	/* Construct a pending open for the file. */
 	pending_op = alloc_pending(fs, packet, RL_MSG_OPEN_HANDLE_ANSWER, complete_findinput);
 	if (!pending_op)
@@ -563,9 +583,11 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 		goto error;
 	}
 
-	/* FIXME: Is filename_cstr always null-terminated? */
-	if (0 != transmit_open_handle_request(fs, pending_op, filename_cstr))
+	if (0 != transmit_open_handle_request(fs, pending_op, full_path))
+	{
+		error_code = ERROR_NOT_A_DOS_DISK;
 		goto error;
+	}
 
 	return;
 
@@ -582,7 +604,21 @@ static void complete_findinput(rl_amigafs_t *fs, rl_pending_operation_t *op, con
 {
 	struct DosPacket * const packet = op->input_packet;
 	struct FileHandle * const fh = BCPL_CAST(struct FileHandle, op->input_packet->dp_Arg1);
+	struct FileLock * const dir_lock = BCPL_CAST(struct FileLock, packet->dp_Arg2);
 	const void *filename_bstr = BCPL_CAST(const void, packet->dp_Arg3);
+	char full_path[RL_AMIGA_PATH_MAX];
+
+	/* cannot fail here -- action_findinput normalized the same
+	 * inputs before putting the request on the wire. */
+	if (0 != normalize_object_path(fs, full_path, sizeof(full_path), dir_lock, filename_bstr))
+	{
+		packet->dp_Res1 = DOSFALSE;
+		packet->dp_Res2 = ERROR_LINE_TOO_LONG;
+		transmit_close_handle(fs, msg->open_handle_answer.handle);
+		reply_to_packet(fs, packet);
+		unlink_pending(fs, op);
+		return;
+	}
 
 	/* Make sure the client is getting a lock on a file. */
 	if (RL_NODE_TYPE_FILE != msg->open_handle_answer.type)
@@ -598,7 +634,7 @@ static void complete_findinput(rl_amigafs_t *fs, rl_pending_operation_t *op, con
 				RL_HANDLE_FILE,
 				msg->open_handle_answer.handle,
 				SHARED_LOCK,
-				BSTR_PTR(filename_bstr),
+				full_path,
 				msg->open_handle_answer.size);
 
 		if (!file_lock)
@@ -643,17 +679,18 @@ static void action_findoutput(rl_amigafs_t *fs, struct DosPacket *packet)
 
 	struct FileLock *file_lock;
 
-	rl_client_handle_t * const dir_handle = HANDLE_FROM_LOCK(dir_lock);
-
 	const void *filename_bstr = BCPL_CAST(const void, packet->dp_Arg3);
-	const char *filename_cstr = BSTR_PTR(filename_bstr);
+	char filename[RL_AMIGA_PATH_MAX];
+	const char *filename_cstr = filename;
 
-	rl_pending_operation_t *pending_op = NULL;
 	LONG error_code = 0;
-	rl_msg_t msg;
 
     RL_LOG_DEBUG(("FINDOUTPUT: directory=\"%d\", name=\"%Q\"",
-				dir_handle->handle_id, packet->dp_Arg3));
+				dir_lock ? HANDLE_FROM_LOCK(dir_lock)->handle_id : -1, packet->dp_Arg3));
+
+	/* A BSTR is not NUL-terminated; the comparison below needs a C string. */
+	if (0 != (error_code = bstr_to_cstr(filename, sizeof(filename), filename_bstr)))
+		goto error;
 
 	/* Skip leading DEVICE: header that is sometimes present */
 	{
@@ -669,12 +706,16 @@ static void action_findoutput(rl_amigafs_t *fs, struct DosPacket *packet)
 	if (0 != rl_strcmp(filename_cstr, RLAUNCH_VIRTUAL_OUTPUT_FILE))
 	{
 		RL_LOG_DEBUG(("FINDOUTPUT: attempt to write to file beside virtual output file"));
+		error_code = ERROR_WRITE_PROTECTED;
 		goto error;
 	}
 
-	file_lock = allocate_lock(fs, RL_HANDLE_VIRTUAL_OUTPUT, RL_FILEHANDLE_VIRTUAL_OUTPUT, EXCLUSIVE_LOCK, BSTR_PTR(filename_bstr), 0);
+	file_lock = allocate_lock(fs, RL_HANDLE_VIRTUAL_OUTPUT, RL_FILEHANDLE_VIRTUAL_OUTPUT, EXCLUSIVE_LOCK, filename_cstr, 0);
 	if (!file_lock)
+	{
+		error_code = ERROR_NO_FREE_STORE;
 		goto error;
+	}
 
 	fh->fh_Type = fs->device_port;
 	fh->fh_Arg1 = (LONG) file_lock;
@@ -1042,7 +1083,7 @@ static void complete_locate_object(rl_amigafs_t *fs, rl_pending_operation_t *op,
 	const void* object_name_bstr = BCPL_CAST(const void, packet->dp_Arg2);
 	char full_path[RL_AMIGA_PATH_MAX];
 
-	/* ponytail: cannot fail here -- action_locate_object normalized the same
+	/* cannot fail here -- action_locate_object normalized the same
 	 * inputs before putting the request on the wire. */
 	if (0 != normalize_object_path(fs, full_path, sizeof(full_path), dir_lock, object_name_bstr))
 	{
