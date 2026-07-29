@@ -137,7 +137,18 @@ rl_transport_on_input_arrived(rl_transport_t *t, rl_socket_t sock)
 	/* read as much as possible */
 	int read_result;
 	const int max_buffer_left = (int) (t->inbuf.end_address - t->inbuf.write_cursor);
-   
+
+	/* recv() with a zero length returns 0, which is indistinguishable from a
+	 * clean disconnect below. rl_transport_update() consumes and compacts
+	 * every complete message, so a full buffer means the pending message can
+	 * never complete -- fail loudly instead of blaming the peer. */
+	if (max_buffer_left <= 0)
+	{
+		RL_LOG_WARNING(("input buffer full with no complete message"));
+		t->error = 1;
+		return;
+	}
+
 	read_result = recv(sock, t->inbuf.write_cursor, max_buffer_left, 0 /* flags */);
 
 	RL_LOG_DEBUG(("read %d bytes (avail space pre:%d post:%d)",
@@ -149,8 +160,10 @@ rl_transport_on_input_arrived(rl_transport_t *t, rl_socket_t sock)
 	}
 	else if (-1 == read_result)
 	{
-		if (RL_LAST_SOCKET_ERROR != EWOULDBLOCK)
-			t->error = 1;	
+		/* EINTR just means a signal landed mid-call; retry on the next select. */
+		const int err = RL_LAST_SOCKET_ERROR;
+		if (EWOULDBLOCK != err && EINTR != err)
+			t->error = 1;
 	}
 	else
 	{

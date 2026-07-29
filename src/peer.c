@@ -375,6 +375,16 @@ static int peer_peek_incoming(rl_transport_t *t, const char	*buf_, size_t len)
 
 	size = (((rl_uint16)buf[2]) << 8) | (buf[3]);
 
+	/* Every message carries an 8-byte header (type, flags, length, sequence),
+	 * so a smaller declared size is garbage. Returning it verbatim would make
+	 * the transport treat 0 as "need more data" and stall on these same bytes
+	 * forever; the negative return routes it to the error path instead. */
+	if (size < 8)
+	{
+		RL_LOG_WARNING(("bogus message size %d in header", (int) size));
+		return -1;
+	}
+
 	return (int) size;
 }
 

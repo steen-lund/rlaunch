@@ -41,7 +41,12 @@
 #elif defined(RL_WIN32)
 #define CloseSocket closesocket
 #define RL_LAST_SOCKET_ERROR WSAGetLastError()
+/* WSAGetLastError() reports the WSA* codes, not the errno.h ones some CRTs
+ * also define, so shadow those names with the values actually returned. */
+#undef EWOULDBLOCK
 #define EWOULDBLOCK WSAEWOULDBLOCK
+#undef EINTR
+#define EINTR WSAEINTR
 
 #elif defined(RL_POSIX)
 # define CloseSocket close

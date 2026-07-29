@@ -723,6 +723,41 @@ UTEST(peer_handshake, a_failed_reply_does_not_report_the_peer_connected)
 }
 
 /* -------------------------------------------------------------------------
+ * transport framing
+ * ------------------------------------------------------------------------- */
+
+/*
+ * A header declaring a length below the 8-byte minimum used to come straight
+ * back out of peer_peek_incoming(). Zero read as "not enough data yet", so the
+ * transport consumed nothing and re-peeked the same four bytes on every update
+ * -- a permanent stall with no ping to break it during the handshake.
+ */
+UTEST(transport_framing, an_undersized_declared_length_is_an_error)
+{
+	static const rl_uint8 header[8] =
+	{
+		RL_MSG_PING_REQUEST, 0, /* hdr_type, hdr_flags */
+		0, 0,                   /* hdr_length -- bogus */
+		0, 0, 0, 0              /* hdr_sequence_num */
+	};
+
+	peer_t peer;
+	rl_controller_t ctl;
+	rl_iobuf_t *in;
+
+	rl_memset(&ctl, 0, sizeof(ctl));
+	handshake_peer_init(&peer, &ctl);
+
+	in = &peer.transport.inbuf;
+	rl_memcpy(in->write_cursor, header, sizeof(header));
+	in->write_cursor += sizeof(header);
+
+	ASSERT_EQ(RL_TRANSPORT_ERROR, rl_transport_update(&peer.transport));
+
+	test_peer_destroy(&peer);
+}
+
+/* -------------------------------------------------------------------------
  * peer list
  * ------------------------------------------------------------------------- */
 
