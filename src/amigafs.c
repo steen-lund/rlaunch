@@ -326,10 +326,34 @@ error:
 	return NULL;
 }
 
+/* Ask the server to open `path` and answer the pending op with the handle. */
+static int transmit_open_handle_request(rl_amigafs_t *fs, rl_pending_operation_t *op, const char *path)
+{
+	rl_msg_t msg;
+
+	RL_MSG_INIT(msg, RL_MSG_OPEN_HANDLE_REQUEST);
+	msg.open_handle_request.hdr_sequence_num	= op->request_seqno;
+	msg.open_handle_request.path				= path;
+	msg.open_handle_request.mode				= RL_OPENFLAG_READ;
+	return peer_transmit_message(fs->peer, &msg);
+}
+
+/* Hand a server-side handle back; its table of them is a fixed size. */
+static void transmit_close_handle(rl_amigafs_t *fs, rl_uint32 handle_id)
+{
+	rl_msg_t msg;
+
+	RL_MSG_INIT(msg, RL_MSG_CLOSE_HANDLE_REQUEST);
+	msg.close_handle_request.hdr_sequence_num = fs->seqno++;
+	msg.close_handle_request.handle = handle_id;
+	RL_LOG_DEBUG(("transmitting close request for handle %d", handle_id));
+	if (0 != peer_transmit_message(fs->peer, &msg))
+		RL_LOG_WARNING(("Couldn't transmit close handle request for id %d", handle_id));
+}
+
 void rl_amigafs_free_lock(rl_amigafs_t *fs, struct FileLock *lock)
 {
 	rl_client_handle_t *handle;
-	rl_msg_t msg;
 
 	RL_ASSERT(lock);
 
@@ -340,13 +364,7 @@ void rl_amigafs_free_lock(rl_amigafs_t *fs, struct FileLock *lock)
 	/* Don't free the device handle (it lives inside the amigafs struct). */
 	if (RL_HANDLE_DEVICE != handle->type)
 	{
-		/* Clean up the server-side handle. */
-		RL_MSG_INIT(msg, RL_MSG_CLOSE_HANDLE_REQUEST);
-		msg.close_handle_request.hdr_sequence_num = fs->seqno++;
-		msg.close_handle_request.handle = handle->handle_id;
-		RL_LOG_DEBUG(("transmitting close request for handle %d", handle->handle_id));
-		if (0 != peer_transmit_message(fs->peer, &msg))
-			RL_LOG_WARNING(("Couldn't transmit close handle request for id %d", handle->handle_id));
+		transmit_close_handle(fs, handle->handle_id);
 		RL_FREE_TYPED(rl_client_handle_t, handle);
 	}
 
@@ -478,7 +496,6 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 
 	rl_pending_operation_t *pending_op = NULL;
 	LONG error_code = 0;
-	rl_msg_t msg;
 
     RL_LOG_DEBUG(("FINDINPUT: directory=\"%d\", name=\"%Q\"",
 				dir_handle->handle_id, packet->dp_Arg3));
@@ -523,11 +540,8 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 		goto error;
 	}
 
-	RL_MSG_INIT(msg, RL_MSG_OPEN_HANDLE_REQUEST);
-	msg.open_handle_request.hdr_sequence_num	= pending_op->request_seqno;
-	msg.open_handle_request.path				= filename_cstr; /* FIXME: Are they always null-terminated? */
-	msg.open_handle_request.mode				= RL_OPENFLAG_READ;
-	if (0 != peer_transmit_message(fs->peer, &msg))
+	/* FIXME: Is filename_cstr always null-terminated? */
+	if (0 != transmit_open_handle_request(fs, pending_op, filename_cstr))
 		goto error;
 
 	return;
@@ -580,13 +594,7 @@ static void complete_findinput(rl_amigafs_t *fs, rl_pending_operation_t *op, con
 
 	/* If we failed, clean up the server-side handle. */
 	if (DOSFALSE == packet->dp_Res1)
-	{
-		rl_msg_t close_msg;
-		RL_MSG_INIT(close_msg, RL_MSG_CLOSE_HANDLE_REQUEST);
-		close_msg.close_handle_request.hdr_sequence_num = fs->seqno++;
-		close_msg.close_handle_request.handle = msg->open_handle_answer.handle;
-		peer_transmit_message(fs->peer, &close_msg);
-	}
+		transmit_close_handle(fs, msg->open_handle_answer.handle);
 
 	reply_to_packet(fs, packet);
 	unlink_pending(fs, op);
@@ -908,7 +916,6 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 	/* The root-lock path below can reach the error label before any pending
 	 * op exists, and the label frees whatever this points at. */
 	rl_pending_operation_t *pending_op = NULL;
-	rl_msg_t msg;
 
     RL_LOG_DEBUG(("LOCATE_OBJECT: directory=\"%d\", name=\"%Q\" mode=%d (%s)",
 				dir_lock ? HANDLE_FROM_LOCK(dir_lock)->handle_id : -1,
@@ -951,11 +958,7 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 		goto error;
 	}
 
-	RL_MSG_INIT(msg, RL_MSG_OPEN_HANDLE_REQUEST);
-	msg.open_handle_request.hdr_sequence_num	= pending_op->request_seqno;
-	msg.open_handle_request.path				= &full_path[0];
-	msg.open_handle_request.mode				= RL_OPENFLAG_READ;
-	if (0 != peer_transmit_message(fs->peer, &msg))
+	if (0 != transmit_open_handle_request(fs, pending_op, full_path))
 	{
 		error_code = ERROR_NOT_A_DOS_DISK;
 		goto error;
@@ -972,15 +975,49 @@ error:
 	reply_to_packet(fs, packet);
 }
 
+/*
+ * Turn the handle the server just opened into a lock on `path` and answer the
+ * packet the operation was started for. Shared by every action that replies
+ * with a lock built from an open_handle_answer.
+ */
+static void complete_lock_from_answer(
+		rl_amigafs_t *fs,
+		rl_pending_operation_t *op,
+		const rl_msg_t *msg,
+		const char *path,
+		LONG access)
+{
+	struct DosPacket * const packet = op->input_packet;
+	const rl_client_handle_type_t type =
+		RL_NODE_TYPE_DIRECTORY == msg->open_handle_answer.type ? RL_HANDLE_DIR : RL_HANDLE_FILE;
+	struct FileLock *lock =
+		allocate_lock(fs, type, msg->open_handle_answer.handle, access, path, msg->open_handle_answer.size);
+
+	if (lock)
+	{
+		packet->dp_Res1 = MKBADDR(lock);
+		packet->dp_Res2 = 0;
+	}
+	else
+	{
+		packet->dp_Res1 = 0;
+		packet->dp_Res2 = ERROR_NO_FREE_STORE;
+
+		/* Nobody is left holding the handle the server just opened for us, and
+		 * its table of them is fixed size -- hand it back. */
+		transmit_close_handle(fs, msg->open_handle_answer.handle);
+	}
+
+	reply_to_packet(fs, packet);
+	unlink_pending(fs, op);
+}
+
 static void complete_locate_object(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg)
 {
-	struct FileLock *lock = NULL;
 	struct DosPacket * const packet = op->input_packet;
 	struct FileLock *dir_lock = BCPL_CAST(struct FileLock, packet->dp_Arg1);
 	const void* object_name_bstr = BCPL_CAST(const void, packet->dp_Arg2);
 	char full_path[RL_AMIGA_PATH_MAX];
-	const rl_client_handle_type_t type =
-		RL_NODE_TYPE_DIRECTORY == msg->open_handle_answer.type ? RL_HANDLE_DIR : RL_HANDLE_FILE;
 
 	/* ponytail: cannot fail here -- action_locate_object normalized the same
 	 * inputs before putting the request on the wire. */
@@ -993,29 +1030,7 @@ static void complete_locate_object(rl_amigafs_t *fs, rl_pending_operation_t *op,
 		return;
 	}
 
-	/* FIXME: The input path here is bogus. */
-	if (NULL != (lock = allocate_lock(fs, type, msg->open_handle_answer.handle, 0, full_path, msg->open_handle_answer.size)))
-	{
-		op->input_packet->dp_Res1 = MKBADDR(lock);
-		op->input_packet->dp_Res2 = 0;
-	}
-	else
-	{
-		rl_msg_t close_msg;
-
-		op->input_packet->dp_Res1 = 0;
-		op->input_packet->dp_Res2 = ERROR_NO_FREE_STORE;
-
-		/* Nobody is left holding the handle the server just opened for us, and
-		 * its table of them is fixed size -- hand it back. */
-		RL_MSG_INIT(close_msg, RL_MSG_CLOSE_HANDLE_REQUEST);
-		close_msg.close_handle_request.hdr_sequence_num = fs->seqno++;
-		close_msg.close_handle_request.handle = msg->open_handle_answer.handle;
-		peer_transmit_message(fs->peer, &close_msg);
-	}
-
-	reply_to_packet(fs, op->input_packet);
-	unlink_pending(fs, op);
+	complete_lock_from_answer(fs, op, msg, full_path, 0);
 }
 
 
@@ -1140,49 +1155,57 @@ static void action_copy_dir(rl_amigafs_t *fs, struct DosPacket *packet)
  *	RES1:	LOCK -	Parent lock
  *	RES2:	Failure code if RES1 = 0
  */
+
+/*
+ * Copy a handle's path with the last component dropped. Returns zero when
+ * there is no component to drop, i.e. the parent is the volume root.
+ */
+static int parent_path_of(char *buffer, size_t buffer_size, const rl_client_handle_t *handle)
+{
+	int len;
+
+	rl_string_copy(buffer_size, buffer, handle->path);
+
+	len = (int) rl_strlen(buffer);
+	while (--len >= 0)
+	{
+		if (buffer[len] == '/')
+		{
+			buffer[len] = '\0';
+			break;
+		}
+	}
+
+	return len > 0;
+}
+
+static void complete_parent(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg);
+
 static void action_parent(rl_amigafs_t *fs, struct DosPacket *packet)
 {
 	struct FileLock *lock = BCPL_CAST(struct FileLock, packet->dp_Arg1);
+	rl_client_handle_t *handle = lock ? HANDLE_FROM_LOCK(lock) : NULL;
 	struct FileLock *result_lock;
-	rl_client_handle_t *handle = HANDLE_FROM_LOCK(lock);
+	rl_pending_operation_t *pending_op = NULL;
+	LONG error_code;
+	char parent_path[RL_AMIGA_PATH_MAX];
 
-	RL_LOG_DEBUG(("ACTION_PARENT for lock %p (%d)", lock, HANDLE_FROM_LOCK(lock)->handle_id));
+	RL_LOG_DEBUG(("ACTION_PARENT for lock %p (%d)", lock, handle ? (int) handle->handle_id : -1));
 
-	if (handle == &fs->root_handle || NULL == handle)
+	if (NULL == handle || &fs->root_handle == handle)
 	{
 		RL_LOG_DEBUG(("[The root handle (or null handle) doesn't have a parent]"));
 		packet->dp_Res1 = DOSFALSE;
 		packet->dp_Res2 = ERROR_OBJECT_NOT_FOUND;
+		reply_to_packet(fs, packet);
+		return;
 	}
-	else
+
+	/* No slashes? Assume it's a file in the root directory and return the root. */
+	if (!parent_path_of(parent_path, sizeof(parent_path), handle))
 	{
-		/* Take the parent handle's path and drop the last path component. */
-		int len;
-		char parent_path[RL_AMIGA_PATH_MAX];
-
-		rl_string_copy(sizeof(parent_path), parent_path, handle->path);
-		len = (int) rl_strlen(parent_path);
-		while (--len >= 0)
-		{
-			if (parent_path[len] == '/')
-			{
-				parent_path[len] = '\0';
-				break;
-			}
-		}
-
-		/* No slashes? Assume it's a file in the root directory and return the root. */
-		if (len <= 0)
-		{
-			RL_LOG_DEBUG(("Returning root lock as parent of %s", handle->path));
-			result_lock = rl_amigafs_alloc_root_lock(fs, SHARED_LOCK);
-		}
-		else
-		{
-			RL_LOG_DEBUG(("parent handle from '%s' to '%s'", handle->path, parent_path));
-			result_lock = allocate_lock(fs, RL_HANDLE_DIR, ~0u, SHARED_LOCK, parent_path, 0);
-		}
-
+		RL_LOG_DEBUG(("Returning root lock as parent of %s", handle->path));
+		result_lock = rl_amigafs_alloc_root_lock(fs, SHARED_LOCK);
 		if (result_lock)
 		{
 			packet->dp_Res1 = MKBADDR(result_lock);
@@ -1191,11 +1214,51 @@ static void action_parent(rl_amigafs_t *fs, struct DosPacket *packet)
 		else
 		{
 			packet->dp_Res1 = DOSFALSE;
-			packet->dp_Res2 = ERROR_OBJECT_NOT_FOUND;
+			packet->dp_Res2 = ERROR_NO_FREE_STORE;
 		}
+		reply_to_packet(fs, packet);
+		return;
 	}
 
+	/* The parent needs a server handle of its own: a fabricated id would name
+	 * the server's root, so enumerating it would list the wrong directory and
+	 * unlocking it would close the root out from under the connection. */
+	RL_LOG_DEBUG(("parent handle from '%s' to '%s'", handle->path, parent_path));
+
+	pending_op = alloc_pending(fs, packet, RL_MSG_OPEN_HANDLE_ANSWER, complete_parent);
+	if (!pending_op)
+	{
+		error_code = ERROR_NO_FREE_STORE;
+		goto error;
+	}
+
+	if (0 != transmit_open_handle_request(fs, pending_op, parent_path))
+	{
+		error_code = ERROR_NOT_A_DOS_DISK;
+		goto error;
+	}
+
+	return;
+
+error:
+	if (pending_op)
+		unlink_pending(fs, pending_op);
+
+	packet->dp_Res1 = DOSFALSE;
+	packet->dp_Res2 = error_code;
 	reply_to_packet(fs, packet);
+}
+
+static void complete_parent(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg)
+{
+	struct FileLock * const lock = BCPL_CAST(struct FileLock, op->input_packet->dp_Arg1);
+	char parent_path[RL_AMIGA_PATH_MAX];
+
+	/* The lock the caller asked the parent of is still theirs, so recomputing
+	 * the path is cheaper than carrying it across the wire and back. */
+	parent_path_of(parent_path, sizeof(parent_path), HANDLE_FROM_LOCK(lock));
+
+	complete_lock_from_answer(fs, op, msg, parent_path, SHARED_LOCK);
 }
 
 /*
