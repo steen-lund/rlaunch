@@ -53,11 +53,15 @@ int rl_decode_array(const unsigned char **cursor, int *size, rl_net_array_t *res
 	if (0 != rl_decode_int4(cursor, &result->length)) /* bumps cursor */
 		return -1;
 
-	if ((int) result->length > *size)
+	*size -= 4;
+
+	/* Compare unsigned against unsigned; a signed cast here lets any length
+	 * with the high bit set pass the check as a negative number. */
+	if (result->length > (rl_uint32) *size)
 		return -1;
 
 	result->base = (const rl_uint8*) (*cursor);
-	*size -= result->length + 4;
+	*size -= (int) result->length;
 	*cursor += result->length;
 	return 0;
 }
