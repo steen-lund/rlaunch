@@ -2010,6 +2010,19 @@ int rl_amigafs_process_network_message(rl_amigafs_t *self, const rl_msg_t *msg)
 	/* If there isn't any pending operation for this message, throw it away. */
 	if (NULL == (pending_op = find_pending_op(self, msg)))
 	{
+		/* Close requests are fire-and-forget: they burn a sequence number but
+		 * register no pending operation, so the server's error answer to one
+		 * arrives unmatched. That failure is ignorable by definition--the
+		 * handle is already gone on this side--and dropping the connection
+		 * over it would take every other open file and lock with it. */
+		if (RL_MSG_ERROR_ANSWER == msg_kind)
+		{
+			RL_LOG_WARNING(("Ignoring unmatched error answer for seq no %u (error %u)",
+						msg->error_answer.hdr_in_reply_to,
+						(unsigned int) msg->error_answer.error_code));
+			return 0;
+		}
+
 		RL_LOG_DEBUG(("Couldn't find pending operation for message %s w/ seq no %u",
 					rl_msg_name(msg_kind), msg->handshake_request.hdr_sequence_num));
 		dump_pending_ops(self);

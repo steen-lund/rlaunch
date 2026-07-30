@@ -553,6 +553,30 @@ UTEST(amigafs, a_duplicated_lock_keeps_the_handle_until_both_are_freed)
 	fixture_destroy(&fix);
 }
 
+UTEST(amigafs, a_failed_close_does_not_tear_down_the_connection)
+{
+	fs_fixture_t fix;
+	struct FileLock *lock;
+	rl_msg_t request, answer;
+
+	fixture_init(&fix);
+	lock = locate_lock(&fix, "hello.txt", 7, RL_NODE_TYPE_FILE);
+
+	rl_amigafs_free_lock(&fix.fs, lock);
+	ASSERT_EQ(0, pop_request(&fix, &request));
+	ASSERT_EQ(RL_MSG_CLOSE_HANDLE_REQUEST, (int)rl_msg_kind_of(&request));
+
+	/* The close is fire-and-forget, so its error answer matches no pending
+	 * operation. A non-zero return here is PEER_ERROR: the whole volume would
+	 * go away over a handle this side has already discarded. */
+	RL_MSG_INIT(answer, RL_MSG_ERROR_ANSWER);
+	answer.error_answer.hdr_in_reply_to = request.close_handle_request.hdr_sequence_num;
+	answer.error_answer.error_code = RL_NETERR_INVALID_VALUE;
+	ASSERT_EQ(0, rl_amigafs_process_network_message(&fix.fs, &answer));
+
+	fixture_destroy(&fix);
+}
+
 /* Reply to whatever request is outstanding with a server-side error. */
 static void fail_pending_request(fs_fixture_t *fix, const rl_msg_t *request)
 {
