@@ -47,4 +47,11 @@ if(NOT AMIGA)
 	add_executable(rl-test test/rlaunch_test.c)
 	target_link_libraries(rl-test PRIVATE common)
 	add_test(NAME rlaunch COMMAND rl-test)
+
+	# Black-box check on the real controller binary; needs a POSIX shell.
+	if(UNIX)
+		add_test(NAME controller-connect
+			COMMAND ${CMAKE_SOURCE_DIR}/test/controller-connect-test.sh
+				$<TARGET_FILE:rl-controller> ${Python3_EXECUTABLE})
+	endif()
 endif()

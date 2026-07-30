@@ -39,6 +39,10 @@ Tests assert correct behaviour, so those covering a still-open bug begin with
 UTEST_SKIP("#N: ...") to keep the build green. Removing that one line is how
 you check a fix: the test should go from skipped to passing.
 
+The same ctest run also drives the rl-controller binary as a subprocess for the
+things that are not reachable from rl-test (test/controller-connect-test.sh).
+Those tests are POSIX-shell only and are skipped on Windows.
+
 amigafs.c is Amiga-only source, but it compiles unmodified for a 32-bit host
 against the real NDK headers in the vbcc image, so it can be unit tested by
 feeding it DosPackets directly:

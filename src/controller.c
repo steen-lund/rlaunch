@@ -118,37 +118,41 @@ static peer_t *connect_to_target(const char* machine, const char* port)
 		goto cleanup;
 	}
 
-	sock = (rl_socket_t) socket(PF_INET, SOCK_STREAM, 0);
-	if (INVALID_SOCKET == sock)
+	/* One socket per candidate address: a socket whose connect() failed cannot
+	 * be reused for the next attempt. */
+	for (addrp = address_list; addrp; addrp = addrp->ai_next)
 	{
-		RL_LOG_CONSOLE(("couldn't create socket\n"));
-		goto cleanup;
-	}
+    int connect_rc, err;
 
-  /* Switch socket to non-blocking mode */
+    sock = (rl_socket_t) socket(PF_INET, SOCK_STREAM, 0);
+    if (INVALID_SOCKET == sock)
+    {
+      RL_LOG_CONSOLE(("couldn't create socket\n"));
+      goto cleanup;
+    }
+
+    /* Switch socket to non-blocking mode */
 #if defined(RL_POSIX)
-  fd_opts = fcntl(sock, F_GETFL, 0);
+    fd_opts = fcntl(sock, F_GETFL, 0);
 
-  if (fcntl(sock, F_SETFL, fd_opts | O_NONBLOCK) != 0)
-  {
-    RL_LOG_CONSOLE(("fcntl nonblock failed\n"));
-    goto cleanup;
-  }
+    if (-1 == fd_opts || fcntl(sock, F_SETFL, fd_opts | O_NONBLOCK) != 0)
+    {
+      RL_LOG_CONSOLE(("fcntl nonblock failed\n"));
+      goto cleanup;
+    }
 #elif defined(RL_WIN32)
-  ioctl_arg = 1;
-  if (0 != ioctlsocket(sock, FIONBIO, &ioctl_arg))
-  {
-    RL_LOG_CONSOLE(("ioctlsocket nonblock failed\n"));
-    goto cleanup;
-  }
+    ioctl_arg = 1;
+    if (0 != ioctlsocket(sock, FIONBIO, &ioctl_arg))
+    {
+      RL_LOG_CONSOLE(("ioctlsocket nonblock failed\n"));
+      goto cleanup;
+    }
 #else
 #error unsupported platform
 #endif
 
-	for (addrp = address_list; addrp; addrp = addrp->ai_next)
-	{
-    int connect_rc = connect(sock, addrp->ai_addr, (int) addrp->ai_addrlen);
-    int err = RL_LAST_SOCKET_ERROR;
+    connect_rc = connect(sock, addrp->ai_addr, (int) addrp->ai_addrlen);
+    err = RL_LAST_SOCKET_ERROR;
 
     RL_LOG_DEBUG(("non-blocking connect => %d w/ errno: %d", connect_rc, (int) err));
 
@@ -156,6 +160,9 @@ static peer_t *connect_to_target(const char* machine, const char* port)
     {
       struct timeval timeout;
       fd_set rset, wset;
+      int so_err = 0;
+      socklen_t so_err_len = sizeof(so_err);
+      int select_rc;
 
       FD_ZERO(&rset);
       FD_ZERO(&wset);
@@ -168,37 +175,55 @@ static peer_t *connect_to_target(const char* machine, const char* port)
 
       RL_LOG_DEBUG(("waiting for connection to complete"));
 
-      select(sock + 1, &rset, &wset, NULL, &timeout);
+      select_rc = select(sock + 1, &rset, &wset, NULL, &timeout);
 
-      if (!FD_ISSET(sock, &rset) && !FD_ISSET(sock, &wset))
+      if (select_rc <= 0)
       {
-        RL_LOG_CONSOLE(("connection timeout - is %s running rlaunch?", machine));
-				goto cleanup;
+        if (0 == select_rc)
+          RL_LOG_CONSOLE(("connection timeout - is %s running rlaunch?", machine));
+        else
+          RL_LOG_CONSOLE(("select() failed while connecting: %d", (int) RL_LAST_SOCKET_ERROR));
+        goto next_address;
       }
 
-      /* Switch back to blocking mode */
-#if defined(RL_POSIX)
-      if (0 != fcntl(sock, F_SETFL, fd_opts))
+      /* Readiness only means the connect finished; SO_ERROR says whether it
+       * succeeded. A refused connection is both readable and writable. */
+      if (0 != getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*) &so_err, &so_err_len))
       {
-        RL_LOG_CONSOLE(("couldn't switch socket back to blocking"));
-				goto cleanup;
+        RL_LOG_CONSOLE(("getsockopt(SO_ERROR) failed: %d", (int) RL_LAST_SOCKET_ERROR));
+        goto next_address;
       }
-#elif defined(RL_WIN32)
-      ioctl_arg = 0;
-      if (0 != ioctlsocket(sock, FIONBIO, &ioctl_arg))
+
+      if (0 != so_err)
       {
-        RL_LOG_CONSOLE(("couldn't switch socket back to blocking"));
-        goto cleanup;
+        RL_LOG_CONSOLE(("connect failed with errno %d - is %s running rlaunch?", so_err, machine));
+        goto next_address;
       }
-#else
-#error unknown platform
-#endif
     }
     else if (0 != connect_rc)
     {
-      RL_LOG_CONSOLE(("some other connect() error: %d - errno: %d", connect_rc, (int) RL_LAST_SOCKET_ERROR));
+      RL_LOG_CONSOLE(("some other connect() error: %d - errno: %d", connect_rc, (int) err));
+      goto next_address;
+    }
+
+    /* Switch back to blocking mode. Also covers the connect that completed
+     * immediately, which never entered the branch above. */
+#if defined(RL_POSIX)
+    if (0 != fcntl(sock, F_SETFL, fd_opts))
+    {
+      RL_LOG_CONSOLE(("couldn't switch socket back to blocking"));
       goto cleanup;
     }
+#elif defined(RL_WIN32)
+    ioctl_arg = 0;
+    if (0 != ioctlsocket(sock, FIONBIO, &ioctl_arg))
+    {
+      RL_LOG_CONSOLE(("couldn't switch socket back to blocking"));
+      goto cleanup;
+    }
+#else
+#error unknown platform
+#endif
 
     if (NULL == (this_peer = RL_ALLOC_TYPED_ZERO(peer_t)))
     {
@@ -213,6 +238,12 @@ static peer_t *connect_to_target(const char* machine, const char* port)
       this_peer = NULL;
       goto cleanup;
     }
+
+    break;
+
+next_address:
+    CloseSocket(sock);
+    sock = INVALID_SOCKET;
 	}
 
 	if (!this_peer)
