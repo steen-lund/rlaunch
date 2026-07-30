@@ -28,7 +28,7 @@ docker run --rm -u "$(id -u):$(id -g)" \
 OUT=\$(mktemp -d)
 # __USE_NEW_TIMEVAL__ is the NDK's own switch for code that also uses the POSIX
 # struct timeval; without it dos/dosextens.h and the host headers collide.
-AMIGA_FLAGS='-m32 -g -O1 -Wall -D__AMIGA__ -D_NO_INLINE -D__USE_NEW_TIMEVAL__ -I/opt/vbcc/NDK3.2/Include_H'
+AMIGA_FLAGS='-m32 -g -O1 -Wall -Werror -D__AMIGA__ -D_NO_INLINE -D__USE_NEW_TIMEVAL__ -I/opt/vbcc/NDK3.2/Include_H'
 
 # The code under test and the harness need the Amiga headers.
 for src in src/amigafs.c test/amigafs_test.c test/amiga_stubs.c; do

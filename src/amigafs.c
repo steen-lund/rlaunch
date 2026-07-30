@@ -34,7 +34,7 @@
 static LONG translate_error_code(rl_uint32 error_code);
 static LONG failed_res1(const rl_pending_operation_t *op);
 static const char* get_packet_type_name(const struct DosPacket* packet);
-static void construct_bstr(char *start, size_t max_size, const char *input);
+static void construct_bstr(TEXT *start, size_t max_size, const char *input);
 
 static const char *rl_client_handle_type_name(rl_client_handle_type_t type)
 {
@@ -166,7 +166,7 @@ static rl_pending_operation_t *alloc_pending(rl_amigafs_t *self, struct DosPacke
 	return op;
 }
 
-static void construct_bstr(char *start, size_t max_size, const char *input)
+static void construct_bstr(TEXT *start, size_t max_size, const char *input)
 {
 	size_t len = rl_strlen(input);
 
@@ -178,7 +178,7 @@ static void construct_bstr(char *start, size_t max_size, const char *input)
 	if (len > avail)
 		len = avail;
 
-	*start++ = (char) len;
+	*start++ = (TEXT) len;
 
 	while(len--)
 	{
@@ -251,11 +251,11 @@ static struct DeviceList *mount_volume(const char *name, struct MsgPort *port)
 	   Delay(50);
    }
 
-   volume = (struct DeviceList *) FindDosEntry(dlist, (char*) name, LDF_VOLUMES);
+   volume = (struct DeviceList *) FindDosEntry(dlist, (CONST_STRPTR) name, LDF_VOLUMES);
 
    UnLockDosList(LDF_VOLUMES|LDF_WRITE);
 
-   if(volume || !(volume = (struct DeviceList *)MakeDosEntry((char*) name, DLT_VOLUME)))
+   if(volume || !(volume = (struct DeviceList *)MakeDosEntry((CONST_STRPTR) name, DLT_VOLUME)))
    {
 	   return NULL;
    }
@@ -1017,7 +1017,6 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 	const LONG mode = packet->dp_Arg3;
 	struct FileLock *result_lock = NULL;
 	char full_path[RL_AMIGA_PATH_MAX];
-	rl_client_handle_t *handle = NULL;
 	/* The root-lock path below can reach the error label before any pending
 	 * op exists, and the label frees whatever this points at. */
 	rl_pending_operation_t *pending_op = NULL;
@@ -1600,7 +1599,6 @@ transmit_write_request(peer_t *peer, rl_client_handle_t *handle, rl_pending_oper
 static void
 action_write(rl_amigafs_t *self, struct DosPacket *packet)
 {
-	rl_msg_t msg;
 	LONG error_code = ERROR_SEEK_ERROR; /* TODO: What to use for real read errors? */
 	struct FileLock *lock = (struct FileLock *) packet->dp_Arg1;
 	rl_client_handle_t *handle = HANDLE_FROM_LOCK(lock);
@@ -1673,7 +1671,7 @@ transmit_write_request(peer_t *peer, rl_client_handle_t *handle, rl_pending_oper
 	RL_MSG_INIT(msg, RL_MSG_WRITE_FILE_REQUEST);
 	msg.write_file_request.hdr_sequence_num	= op->request_seqno;
 	msg.write_file_request.handle			= handle->handle_id;
-	msg.write_file_request.data.base		= data;
+	msg.write_file_request.data.base		= (const rl_uint8 *) data;
 	msg.write_file_request.data.length		= count;
 
 	op->detail.write.source = data;

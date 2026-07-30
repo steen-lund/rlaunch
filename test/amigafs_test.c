@@ -27,6 +27,8 @@ struct peer_tag;
 #include <exec/ports.h>
 #include <dos/dos.h>
 #include <dos/dosextens.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
 
 #include <stdio.h>
 #include <stdlib.h>
