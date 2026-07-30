@@ -44,12 +44,12 @@ jobs:
         path: dist
 
   # Boots AROS m68k under Amiberry and drives a real target with the host
-  # controller. Non-blocking until it has proven stable -- an emulator boot is
-  # the flakiest thing in this workflow.
+  # controller. This is the only job that covers the open -> read -> close path
+  # a user actually walks, so it blocks: if it goes flaky, the flakiness is the
+  # bug.
   AmigaE2E:
     needs: Linux
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
     - uses: actions/checkout@v3
     - name: build host

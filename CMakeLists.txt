@@ -55,6 +55,15 @@ if(NOT AMIGA)
 				$<TARGET_FILE:rl-controller> ${Python3_EXECUTABLE})
 	endif()
 
+	# The amigafs unit tests build inside the vbcc image, so they can only run
+	# where that image exists; the script exits 77 and ctest reports a skip
+	# otherwise.
+	if(UNIX)
+		add_test(NAME amigafs-host
+			COMMAND ${CMAKE_SOURCE_DIR}/test/amigafs-host-test.sh ${GEN})
+		set_tests_properties(amigafs-host PROPERTIES SKIP_RETURN_CODE 77)
+	endif()
+
 	add_test(NAME controller-spawn-failure
 		COMMAND ${Python3_EXECUTABLE}
 			${CMAKE_SOURCE_DIR}/test/controller-spawn-failure-test.py

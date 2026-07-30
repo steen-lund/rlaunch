@@ -11,20 +11,24 @@
 # image is the same one the Amiga build already needs.
 set -euo pipefail
 
+# Exit 77 when the toolchain image is unavailable; ctest maps that to "skipped"
+# so a host-only `ctest` on a machine without docker stays green.
 IMAGE=rlaunch-vbcc
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 GEN=${1:-build-amiga/generated}
+case $GEN in /*) ;; *) GEN=$ROOT/$GEN ;; esac
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "$IMAGE image missing -- configure the amiga build first:"
 	echo "  cmake -B build-amiga -DCMAKE_TOOLCHAIN_FILE=cmake/amiga-vbcc.cmake"
-	exit 1
+	exit 77
 fi
 
-test -f "$ROOT/$GEN/rlnet.c" || { echo "generated rlnet.c missing; build the amiga target first"; exit 1; }
+test -f "$GEN/rlnet.c" || { echo "generated rlnet.c missing; build the amiga target first"; exit 1; }
 
+# GEN is mounted separately so an out-of-tree build directory still works.
 docker run --rm -u "$(id -u):$(id -g)" \
-	-v "$ROOT:$ROOT" -w "$ROOT" "$IMAGE" bash -eu -c "
+	-v "$ROOT:$ROOT" -v "$GEN:$GEN" -w "$ROOT" "$IMAGE" bash -eu -c "
 OUT=\$(mktemp -d)
 # __USE_NEW_TIMEVAL__ is the NDK's own switch for code that also uses the POSIX
 # struct timeval; without it dos/dosextens.h and the host headers collide.
