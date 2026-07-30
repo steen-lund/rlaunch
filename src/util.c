@@ -99,6 +99,15 @@ static void format_message(const char *format, va_list args, format_write_func w
 			++cursor;
 		}
 
+		/* A '%' at the very end of the format string has no conversion
+		 * character after it. Emit what is left literally instead of stepping
+		 * the cursor past the NUL terminator. */
+		if ('\0' == *cursor)
+		{
+			(*wf)(fmt_pos, rl_strlen(fmt_pos), writer_state);
+			return;
+		}
+
 		switch (*cursor++)
 		{
 			case 'd':
@@ -117,14 +126,14 @@ static void format_message(const char *format, va_list args, format_write_func w
 
 			case 'x':
 			{
-				size_t value = va_arg(args, int);
+				size_t value = va_arg(args, unsigned int);
 				format_integer_unsigned(value, 16, falign_left, fwidth, fill, wf, writer_state);
 				break;
 			}
 
 			case 'b':
 			{
-				size_t value = va_arg(args, int);
+				size_t value = va_arg(args, unsigned int);
 				format_integer_unsigned(value, 2, falign_left, fwidth, fill, wf, writer_state);
 				break;
 			}
@@ -192,13 +201,12 @@ static const char format_base_digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
 static void format_integer_signed(ssize_t value, int base, int falign_left, int fwidth, char fill, format_write_func wf, void *writer_state)
 {
-	ssize_t v = value;
+	/* Accumulate the magnitude unsigned -- negating the most negative value
+	 * would overflow, and a negative v would index outside the digit table. */
+	size_t v = value < 0 ? (size_t) 0 - (size_t) value : (size_t) value;
 	char buffer[64];
 	char *p = &buffer[63];
 	*p-- = 0;
-
-	if (v < 0)
-		v = -v;
 
 	do
 	{
@@ -279,86 +287,111 @@ void rl_toggle_log_bits(const char *argument)
 	}
 }
 
-static char log_buffer[256];
-static char *log_cursor = &log_buffer[0];
-static char * const log_max = &log_buffer[sizeof(log_buffer)-1];
-
+/*
+ * The log line buffer lives on the caller's stack rather than in a static.
+ * On Amiga the launcher process spawned by target.c logs concurrently with the
+ * main task, and a shared buffer plus a shared cursor has no synchronization
+ * behind it -- interleaved writes would corrupt the cursor and run off the end.
+ * A per-call buffer has no shared state to race over.
+ */
+typedef struct log_state_tag
+{
+	char buffer[256];
+	size_t used;
+} log_state_t;
 
 #ifdef RL_AMIGA
 void __RawPutChar(__reg("a6") void *, __reg("d0") char ch)="\tjsr\t-516(a6)";
 #define RawPutChar(ch) __RawPutChar(SysBase, (ch))
 #endif
 
-static void log_flush()
+static void log_flush(log_state_t *log)
 {
-	*log_cursor = 0;
+	if (0 == log->used)
+		return;
+
+	log->buffer[log->used] = 0;
+	log->used = 0;
+
 #ifdef RL_AMIGA
 	if (rl_log_bits & RL_SERIAL_OUT)
 	{
-		log_cursor = &log_buffer[0];
-		while(*log_cursor) {
-			RawPutChar(*log_cursor);
-			log_cursor++;
+		const char *p = &log->buffer[0];
+		while (*p)
+		{
+			RawPutChar(*p);
+			++p;
 		}
 	}
 	else if (DOSBase)
 	{
-		FPuts(Output(), log_buffer);
+		FPuts(Output(), log->buffer);
 		Flush(Output());
 		/* Delay(20); */
 	}
 #else
-	fputs(log_buffer, stdout);
+	fputs(log->buffer, stdout);
 #endif
-	log_cursor = &log_buffer[0];
 }
 
 static void write_log(const char *str, size_t len, void *state)
 {
+	log_state_t * const log = (log_state_t *) state;
 	size_t i;
 
 	for (i=0; i<len; ++i)
 	{
 		const char ch = str[i];
 
-		*log_cursor++ = ch;
-		if (log_cursor == log_max || '\n' == ch)
+		log->buffer[log->used++] = ch;
+		if (log->used == sizeof(log->buffer) - 1 || '\n' == ch)
 		{
-			log_flush();
+			log_flush(log);
 		}
 	}
 }
 
-static void do_log(const char *fmt, ...)
+/* Appends to the caller's line buffer, so several calls can build one line
+ * before it is flushed. */
+static void do_log(log_state_t *log, const char *fmt, ...)
 {
 	va_list args;
+
 	va_start(args, fmt);
-	format_message(fmt, args, write_log, NULL);
+	format_message(fmt, args, write_log, log);
 	va_end(args);
 }
 
 void rl_log_message(const char *fmt, ...)
 {
+	log_state_t log;
 	va_list args;
+
+	log.used = 0;
 	va_start(args, fmt);
-	format_message(fmt, args, write_log, NULL);
+	format_message(fmt, args, write_log, &log);
 	va_end(args);
-	write_log("\n", 1, NULL);
+	write_log("\n", 1, &log);
 }
 
 void rl_dump_buffer(const void *ptr, size_t size)
 {
+	log_state_t log;
 	size_t i;
 	const rl_uint8 *p = (const rl_uint8*) ptr;
+
+	/* One buffer for the whole dump: a line is built across several calls and
+	 * flushed when its newline arrives, rather than once per byte. */
+	log.used = 0;
 
 	for (i=0; i<size; ++i)
 	{
 		if ((i % 8) == 0)
-			do_log("\n%08x   ", (int) i);
+			do_log(&log, "\n%08x   ", (int) i);
 
-		do_log("%02x ", p[i]);
+		do_log(&log, "%02x ", p[i]);
 	}
-	do_log("\n");
+	do_log(&log, "\n");
 }
 
 typedef struct safe_format_state_tag
@@ -601,15 +634,18 @@ int rl_string_copy(size_t dest_size, char *dest, const char *source)
 
 	while (dest != dest_max)
 	{
-		char ch = *source++;
+		char ch = *source;
 		if (!ch)
 			break;
-		*dest++  = ch;
+		*dest++ = ch;
+		++source;
 	}
 
 	*dest = '\0';
 
-	return dest == dest_max ? -1 : 0;
+	/* Only a source with characters left over was actually truncated; one that
+	 * fills the destination exactly is a complete copy. */
+	return *source ? -1 : 0;
 }
 
 static INLINE void strbuf_append_ch(rl_strbuf_t *buf, char ch)

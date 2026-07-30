@@ -289,30 +289,35 @@ UTEST(format, trailing_percent_is_not_read_past_the_format_string)
 {
 	char buffer[64];
 
-	UTEST_SKIP("#24: a bare trailing %% consumes the NUL and reads past the format string");
-
 	rl_format_msg(buffer, sizeof(buffer), "100%");
 	ASSERT_STREQ("100%", buffer);
+
+	/* Same for a percent whose flags and width run into the terminator. */
+	rl_format_msg(buffer, sizeof(buffer), "hi %-05");
+	ASSERT_STREQ("hi %-05", buffer);
 }
 
 UTEST(format, hex_does_not_sign_extend)
 {
 	char buffer[64];
 
-	UTEST_SKIP("#24: %x fetches a signed int, so values >= 0x80000000 sign-extend");
-
 	rl_format_msg(buffer, sizeof(buffer), "%x", 0x80000000u);
 	ASSERT_STREQ("80000000", buffer);
+
+	rl_format_msg(buffer, sizeof(buffer), "%x", 0xffffffffu);
+	ASSERT_STREQ("ffffffff", buffer);
+
+	rl_format_msg(buffer, sizeof(buffer), "%b", 0x80000000u);
+	ASSERT_STREQ("10000000000000000000000000000000", buffer);
 }
 
 UTEST(format, handles_the_most_negative_integer)
 {
 	char buffer[64];
 
-	/* This passes on a 64-bit host: %d fetches an int and format_integer_signed
-	 * widens it to ssize_t, so negating it is safe. The out-of-bounds negation
-	 * in issue #24 needs value == SSIZE_MIN, which %d cannot deliver here --
-	 * but it is reachable on the 32-bit Amiga build. */
+	/* %d fetches an int and format_integer_signed widens it to ssize_t, so on a
+	 * 64-bit host this never reaches the most-negative ssize_t. It does on the
+	 * 32-bit Amiga build, where the magnitude is now accumulated unsigned. */
 	rl_format_msg(buffer, sizeof(buffer), "%d", INT_MIN);
 	ASSERT_STREQ("-2147483648", buffer);
 }
@@ -321,9 +326,11 @@ UTEST(format, string_copy_of_an_exact_fit_is_not_truncation)
 {
 	char buffer[4];
 
-	UTEST_SKIP("#24: rl_string_copy reports truncation when the source fits exactly");
-
 	ASSERT_EQ(0, rl_string_copy(sizeof(buffer), buffer, "abc"));
+	ASSERT_STREQ("abc", buffer);
+
+	/* One character more than fits is still reported as truncation. */
+	ASSERT_EQ(-1, rl_string_copy(sizeof(buffer), buffer, "abcd"));
 	ASSERT_STREQ("abc", buffer);
 }
 
