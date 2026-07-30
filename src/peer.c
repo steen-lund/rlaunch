@@ -137,10 +137,9 @@ static void on_transmit_handshake(peer_t *self, const rl_msg_t *param_unused_)
 	rl_msg_t msg;
 	rl_msg_handshake_request_t *request;
 
+	RL_MSG_INIT(msg, RL_MSG_HANDSHAKE_REQUEST);
+
 	request = &msg.handshake_request;
-	request->hdr_type = RL_MSG_HANDSHAKE_REQUEST;
-	request->hdr_flags = 0;
-	request->hdr_sequence_num = 0;
 	request->version_major = RLAUNCH_VER_MAJOR;
 	request->version_minor = RLAUNCH_VER_MINOR;
 
@@ -185,6 +184,7 @@ static void on_transmit_handshake(peer_t *self, const rl_msg_t *param_unused_)
 	}
 	else
 	{
+		request->platform_name = "unknown";
 		rl_format_msg(uname_data.nodename, sizeof(uname_data.nodename), "unknown");
 		rl_format_msg(platform_version, sizeof(platform_version), "unknown");
 	}
