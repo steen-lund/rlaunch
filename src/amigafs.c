@@ -424,93 +424,68 @@ void rl_amigafs_free_lock(rl_amigafs_t *fs, struct FileLock *lock)
 #define HANDLER_RANGE_1_FIRST (0)
 #define HANDLER_RANGE_1_LAST (34)
 
-enum handler_flags
-{
-	BP1	= 0x0001,
-	BP2	= 0x0002,
-	BP3	= 0x0004,
-	BP4	= 0x0008
-};
-
 typedef void (*packet_handler_fn)(rl_amigafs_t *fs, struct DosPacket *packet);
 
-typedef struct lookup_entry_t
-{
-	/* Pointer to a function that will handle this message, or NULL if it is
-	 * unsupported. */
-	packet_handler_fn function;
-
-	/* Indicates what arguments are BCPL pointer and must be adjusted with a
-	 * two-bit left shift--this is done once before invoking the handlers
-	 * rather than being sprinkled in the handlers so that sanity can be
-	 * preserved.
-	 */
-	int flags;
-} lookup_entry_t;
-
-/* Handler functions. */
+/* Handler functions. NULL in the table below means the action is not
+ * implemented at all; action_unsupported means it is known but always
+ * rejected. BCPL pointer arguments are adjusted by the individual handlers
+ * with BCPL_CAST(). */
 
 static void action_die				(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_current_volume	(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_locate_object	(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_free_lock		(rl_amigafs_t *fs, struct DosPacket *packet);
-static void action_delete_object	(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_copy_dir			(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_examine_object	(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_examine_next		(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_disk_info		(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_info				(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_parent			(rl_amigafs_t *fs, struct DosPacket *packet);
-static void action_inhibit			(rl_amigafs_t *fs, struct DosPacket *packet);
+static void action_unsupported		(rl_amigafs_t *fs, struct DosPacket *packet);
 
-static void action_rename_disk		(rl_amigafs_t *fs, struct DosPacket *packet);
-static void action_rename_object	(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_set_protect		(rl_amigafs_t *fs, struct DosPacket *packet);
-static void action_create_dir		(rl_amigafs_t *fs, struct DosPacket *packet);
-static void action_flush			(rl_amigafs_t *fs, struct DosPacket *packet); 
-static void action_set_comment		(rl_amigafs_t *fs, struct DosPacket *packet);
-static void action_set_file_date	(rl_amigafs_t *fs, struct DosPacket *packet);
+static void action_flush			(rl_amigafs_t *fs, struct DosPacket *packet);
 
 static void action_findinput		(rl_amigafs_t *fs, struct DosPacket *packet);
 static void action_findoutput		(rl_amigafs_t *fs, struct DosPacket *packet);
 
-static const lookup_entry_t packet_handlers_range_1[(HANDLER_RANGE_1_LAST - HANDLER_RANGE_1_FIRST) + 1] =
+static const packet_handler_fn packet_handlers_range_1[(HANDLER_RANGE_1_LAST - HANDLER_RANGE_1_FIRST) + 1] =
 {
-   { NULL,					0  | 0	| 0  | 0   }, /*  0 - ACTION_NIL		   */
-   { NULL,					0  | 0	| 0  | 0   }, /*  1 - Unknown			   */
-   { NULL,					BP1| BP2| BP3| 0   }, /*  2 - ACTION_GET_BLOCK	   */
-   { NULL,					0  | BP2| BP3| 0   }, /*  3 - Unknown			   */
-   { NULL,					BP1| BP2| BP3| 0   }, /*  4 - ACTION_SET_MAP	   */
-   { action_die,			0  | 0	| 0  | 0   }, /*  5 - ACTION_DIE		   */
-   { NULL,					0  | 0	| 0  | 0   }, /*  6 - ACTION_EVENT		   */
-   { action_current_volume,	BP1| 0	| 0  | 0   }, /*  7 - ACTION_CURRENT_VOLUME*/
-   { action_locate_object,	BP1| BP2| 0  | 0   }, /*  8 - ACTION_LOCATE_OBJECT */
-   { action_rename_disk,	BP1| BP2| 0  | 0   }, /*  9 - ACTION_RENAME_DISK   */
-   { NULL,					0  | 0	| 0  | 0   }, /* 10 - Unknown			   */
-   { NULL,					0  | 0	| 0  | 0   }, /* 11 - Unknown			   */
-   { NULL,					0  | 0	| 0  | 0   }, /* 12 - Unknown			   */
-   { NULL,					0  | 0	| 0  | 0   }, /* 13 - Unknown			   */
-   { NULL,					0  | 0	| 0  | 0   }, /* 14 - Unknown			   */
-   { action_free_lock,		BP1| 0	| 0  | 0   }, /* 15 - ACTION_FREE_LOCK	   */
-   { action_delete_object,	BP1| BP2| 0  | 0   }, /* 16 - ACTION_DELETE_OBJECT */
-   { action_rename_object,	BP1| BP2| BP3| BP4 }, /* 17 - ACTION_RENAME_OBJECT */
-   { NULL,					0  | 0	| 0  | 0   }, /* 18 - ACTION_MORE_CACHE    */
-   { action_copy_dir,		BP1| 0	| 0  | 0   }, /* 19 - ACTION_COPY_DIR	   */
-   { NULL,					0  | 0	| 0  | 0   }, /* 20 - ACTION_WAIT_CHAR	   */
-   { action_set_protect,	0  | BP2| BP3| 0   }, /* 21 - ACTION_SET_PROTECT   */
-   { action_create_dir,		BP1| BP2| 0  | 0   }, /* 22 - ACTION_CREATE_DIR    */
-   { action_examine_object,	BP1| BP2| 0  | 0   }, /* 23 - ACTION_EXAMINE_OBJECT*/
-   { action_examine_next,	BP1| BP2| 0  | 0   }, /* 24 - ACTION_EXAMINE_NEXT  */
-   { action_disk_info,		BP1| 0	| 0  | 0   }, /* 25 - ACTION_DISK_INFO	   */
-   { action_info,			BP1| BP2| 0  | 0   }, /* 26 - ACTION_INFO		   */
-   { action_flush,			0  | 0	| 0  | 0   }, /* 27 - ACTION_FLUSH		   */
-   { action_set_comment,	0  | BP2| BP3| BP4 }, /* 28 - ACTION_SET_COMMENT   */
-   { action_parent,			BP1| 0	| 0  | 0   }, /* 29 - ACTION_PARENT		   */
-   { NULL,					BP1| 0	| 0  | 0   }, /* 30 - ACTION_TIMER		   */
-   { action_inhibit,		0  | 0	| 0  | 0   }, /* 31 - ACTION_INHIBIT	   */
-   { NULL,					BP1| 0	| 0  | 0   }, /* 32 - ACTION_DISK_TYPE	   */
-   { NULL,					0  | 0	| 0  | 0   }, /* 33 - ACTION_DISK_CHANGE   */
-   { action_set_file_date,	0  | 0	| 0  | 0   }  /* 34 - ACTION_SET_FILE_DATE */
+   NULL,					/*  0 - ACTION_NIL			 */
+   NULL,					/*  1 - Unknown				 */
+   NULL,					/*  2 - ACTION_GET_BLOCK	 */
+   NULL,					/*  3 - Unknown				 */
+   NULL,					/*  4 - ACTION_SET_MAP		 */
+   action_die,				/*  5 - ACTION_DIE			 */
+   NULL,					/*  6 - ACTION_EVENT		 */
+   action_current_volume,	/*  7 - ACTION_CURRENT_VOLUME*/
+   action_locate_object,	/*  8 - ACTION_LOCATE_OBJECT */
+   action_unsupported,		/*  9 - ACTION_RENAME_DISK	 */
+   NULL,					/* 10 - Unknown				 */
+   NULL,					/* 11 - Unknown				 */
+   NULL,					/* 12 - Unknown				 */
+   NULL,					/* 13 - Unknown				 */
+   NULL,					/* 14 - Unknown				 */
+   action_free_lock,		/* 15 - ACTION_FREE_LOCK	 */
+   action_unsupported,		/* 16 - ACTION_DELETE_OBJECT */
+   action_unsupported,		/* 17 - ACTION_RENAME_OBJECT */
+   NULL,					/* 18 - ACTION_MORE_CACHE	 */
+   action_copy_dir,			/* 19 - ACTION_COPY_DIR		 */
+   NULL,					/* 20 - ACTION_WAIT_CHAR	 */
+   action_set_protect,		/* 21 - ACTION_SET_PROTECT	 */
+   action_unsupported,		/* 22 - ACTION_CREATE_DIR	 */
+   action_examine_object,	/* 23 - ACTION_EXAMINE_OBJECT*/
+   action_examine_next,		/* 24 - ACTION_EXAMINE_NEXT	 */
+   action_disk_info,		/* 25 - ACTION_DISK_INFO	 */
+   action_info,				/* 26 - ACTION_INFO			 */
+   action_flush,			/* 27 - ACTION_FLUSH		 */
+   action_unsupported,		/* 28 - ACTION_SET_COMMENT	 */
+   action_parent,			/* 29 - ACTION_PARENT		 */
+   NULL,					/* 30 - ACTION_TIMER		 */
+   action_unsupported,		/* 31 - ACTION_INHIBIT		 */
+   NULL,					/* 32 - ACTION_DISK_TYPE	 */
+   NULL,					/* 33 - ACTION_DISK_CHANGE	 */
+   action_unsupported		/* 34 - ACTION_SET_FILE_DATE */
 };
 
 static void action_is_filesystem(rl_amigafs_t *fs, struct DosPacket* packet)
@@ -1843,8 +1818,7 @@ static void process_fs_packet(rl_amigafs_t *self, struct DosPacket* packet)
 	/* handle common packets in the continous low range via a lookup table */
 	else if (packet_type >= HANDLER_RANGE_1_FIRST && packet_type <= HANDLER_RANGE_1_LAST)
 	{
-		const lookup_entry_t* entry = &packet_handlers_range_1[packet_type];
-		handler = entry->function;
+		handler = packet_handlers_range_1[packet_type];
 	}
 	/* handle later extension packets with a switch--why didn't they order them
 	 * continually?! */
@@ -2161,59 +2135,11 @@ static void action_current_volume(rl_amigafs_t *self, struct DosPacket* packet)
 	return;
 }
 
-static void action_delete_object(rl_amigafs_t *self, struct DosPacket* packet)
+/* Every action this filesystem knows about but does not implement: reject it
+ * and name it from the dispatch table rather than a per-action literal. */
+static void action_unsupported(rl_amigafs_t *self, struct DosPacket* packet)
 {
-	RL_LOG_DEBUG(("action_delete_object"));
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = 0;
-	reply_to_packet(self, packet);
-	return;
-}
-
-static void action_inhibit(rl_amigafs_t *self, struct DosPacket* packet)
-{
-	RL_LOG_DEBUG(("action_inhibit"));
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = 0;
-	reply_to_packet(self, packet);
-}
-
-static void action_rename_disk(rl_amigafs_t *self, struct DosPacket* packet)
-{
-	RL_LOG_DEBUG(("action_rename_disk"));
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = 0;
-	reply_to_packet(self, packet);
-}
-
-static void action_rename_object(rl_amigafs_t *self, struct DosPacket* packet)
-{
-	RL_LOG_DEBUG(("action_rename_object"));
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = 0;
-	reply_to_packet(self, packet);
-}
-
-static void action_create_dir(rl_amigafs_t *self, struct DosPacket* packet)
-{
-	RL_LOG_DEBUG(("action_rename_object"));
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = 0;
-	reply_to_packet(self, packet);
-}
-
-/* static void action_flush(rl_amigafs_t *self, struct DosPacket* packet) {} */
-static void action_set_comment(rl_amigafs_t *self, struct DosPacket* packet)
-{
-	RL_LOG_DEBUG(("action_set_comment"));
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = 0;
-	reply_to_packet(self, packet);
-}
-
-static void action_set_file_date(rl_amigafs_t *self, struct DosPacket* packet)
-{
-	RL_LOG_DEBUG(("action_set_file_date"));
+	RL_LOG_DEBUG(("%s: unsupported", get_packet_type_name(packet)));
 	packet->dp_Res1 = DOSFALSE;
 	packet->dp_Res2 = 0;
 	reply_to_packet(self, packet);
