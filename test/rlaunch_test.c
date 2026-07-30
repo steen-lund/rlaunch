@@ -356,6 +356,42 @@ UTEST(format, string_copy_of_an_exact_fit_is_not_truncation)
 	ASSERT_STREQ("abc", buffer);
 }
 
+/*
+ * The directory listing assembles every entry path with these, so a truncating
+ * append must still leave a terminated string behind rather than run off the
+ * buffer.
+ */
+UTEST(strbuf, appends_until_full_and_stays_terminated)
+{
+	char buffer[8];
+	rl_strbuf_t buf;
+
+	rl_strbuf_init(&buf, buffer, sizeof(buffer));
+	ASSERT_STREQ("", buffer);
+
+	ASSERT_NE(0, rl_strbuf_append(&buf, "abc"));
+	ASSERT_NE(0, rl_strbuf_append(&buf, "/"));
+	ASSERT_STREQ("abc/", buffer);
+
+	/* Overflowing reports failure, keeps what fit and still terminates. */
+	ASSERT_EQ(0, rl_strbuf_append(&buf, "0123456789"));
+	ASSERT_STREQ("abc/012", buffer);
+
+	/* Appending to a full buffer cannot grow it. */
+	ASSERT_EQ(0, rl_strbuf_append(&buf, "x"));
+	ASSERT_STREQ("abc/012", buffer);
+}
+
+UTEST(strbuf, append_str_len_stops_at_the_requested_length)
+{
+	char buffer[16];
+	rl_strbuf_t buf;
+
+	rl_strbuf_init(&buf, buffer, sizeof(buffer));
+	ASSERT_NE(0, rl_strbuf_append_str_len(&buf, "abcdef", 3));
+	ASSERT_STREQ("abc", buffer);
+}
+
 /* -------------------------------------------------------------------------
  * file_server.c -- path handling
  * ------------------------------------------------------------------------- */
@@ -713,6 +749,208 @@ UTEST(file_server, writing_to_an_unknown_handle_replies_with_an_error)
 
 	test_peer_destroy(&peer);
 }
+
+/*
+ * Drain a whole directory listing. Names are collected as "|name|" runs so a
+ * test can assert membership with strstr() without a prefix matching a longer
+ * name. The reply's name points into a pooled transport buffer, so it has to be
+ * copied out before the next request is served. Returns the number of entries,
+ * or -1 if the server answered with an error part-way through.
+ */
+static int list_directory(peer_t *peer, rl_uint32 handle, char *out, size_t out_size)
+{
+	rl_msg_t request, reply;
+	int reset = 1;
+	int count = 0;
+
+	out[0] = '\0';
+
+	for (;;)
+	{
+		const char *name;
+
+		RL_MSG_INIT(request, RL_MSG_FIND_NEXT_FILE_REQUEST);
+		request.find_next_file_request.handle = handle;
+		request.find_next_file_request.reset = (rl_uint8) reset;
+		reset = 0;
+		rl_file_serve(peer, &request);
+
+		TEST_REQUIRE(0 == pop_reply(peer, &reply));
+
+		if (RL_MSG_FIND_NEXT_FILE_ANSWER != (int)rl_msg_kind_of(&reply))
+			return -1;
+
+		if (reply.find_next_file_answer.end_of_sequence)
+			break;
+
+		name = reply.find_next_file_answer.name;
+		TEST_REQUIRE(strlen(out) + strlen(name) + 3 <= out_size);
+		strcat(out, "|");
+		strcat(out, name);
+		strcat(out, "|");
+
+		/* A listing that never ends would otherwise hang the suite. */
+		TEST_REQUIRE(++count < 64);
+	}
+
+	return count;
+}
+
+static void make_sub_dir(const char *root, const char *name)
+{
+	char path[512];
+
+	rl_format_msg(path, sizeof(path), "%s/%s", root, name);
+#if defined(RL_WIN32)
+	TEST_REQUIRE(CreateDirectoryA(path, NULL));
+#else
+	TEST_REQUIRE(0 == mkdir(path, 0777));
+#endif
+}
+
+/*
+ * '.' and '..' cannot be used from the Amiga side -- escapes_root() rejects
+ * '..' outright -- so neither host may serve them. Every other name, dotfiles
+ * included, has to survive: the Win32 filter used to drop the whole lot.
+ */
+UTEST(file_server, listing_a_directory_hides_dot_and_dotdot_but_keeps_dotfiles)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	char root[256];
+	char names[512];
+	int count;
+
+	test_controller_init(&ctl, root, sizeof(root));
+	write_file(root, "a.txt", "0123456789");
+	write_file(root, ".hidden", "x");
+	make_sub_dir(root, "sub");
+	test_peer_init(&peer, &ctl);
+
+	count = list_directory(&peer, (rl_uint32)-1, names, sizeof(names));
+
+	ASSERT_EQ(3, count);
+	ASSERT_TRUE(NULL != strstr(names, "|a.txt|"));
+	ASSERT_TRUE(NULL != strstr(names, "|.hidden|"));
+	ASSERT_TRUE(NULL != strstr(names, "|sub|"));
+	ASSERT_TRUE(NULL == strstr(names, "|.|"));
+	ASSERT_TRUE(NULL == strstr(names, "|..|"));
+
+	test_peer_destroy(&peer);
+}
+
+UTEST(file_server, listing_reports_the_type_and_size_of_each_entry)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	rl_msg_t request, reply;
+	char root[256];
+
+	test_controller_init(&ctl, root, sizeof(root));
+	write_file(root, "only.txt", "0123456789");
+	test_peer_init(&peer, &ctl);
+
+	RL_MSG_INIT(request, RL_MSG_FIND_NEXT_FILE_REQUEST);
+	request.find_next_file_request.handle = (rl_uint32)-1;
+	request.find_next_file_request.reset = 1;
+	rl_file_serve(&peer, &request);
+
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ(RL_MSG_FIND_NEXT_FILE_ANSWER, (int)rl_msg_kind_of(&reply));
+	ASSERT_EQ((rl_uint8)0, reply.find_next_file_answer.end_of_sequence);
+	ASSERT_STREQ("only.txt", reply.find_next_file_answer.name);
+	ASSERT_EQ((rl_uint8)RL_NODE_TYPE_FILE, reply.find_next_file_answer.type);
+	ASSERT_EQ((rl_uint32)10, reply.find_next_file_answer.size);
+
+	/* And the sequence terminates rather than repeating the entry. */
+	RL_MSG_INIT(request, RL_MSG_FIND_NEXT_FILE_REQUEST);
+	request.find_next_file_request.handle = (rl_uint32)-1;
+	rl_file_serve(&peer, &request);
+
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ((rl_uint8)1, reply.find_next_file_answer.end_of_sequence);
+
+	test_peer_destroy(&peer);
+}
+
+/* reset restarts the walk, which is how the Amiga side re-examines a directory. */
+UTEST(file_server, resetting_a_listing_starts_over)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	char root[256];
+	char first[512], second[512];
+
+	test_controller_init(&ctl, root, sizeof(root));
+	write_file(root, "a.txt", "a");
+	write_file(root, "b.txt", "bb");
+	test_peer_init(&peer, &ctl);
+
+	ASSERT_EQ(2, list_directory(&peer, (rl_uint32)-1, first, sizeof(first)));
+	ASSERT_TRUE(NULL != strstr(first, "|a.txt|"));
+	ASSERT_TRUE(NULL != strstr(first, "|b.txt|"));
+
+	/* The second walk starts from a reset, so it sees the same two entries
+	 * rather than resuming at end-of-directory. */
+	ASSERT_EQ(2, list_directory(&peer, (rl_uint32)-1, second, sizeof(second)));
+	ASSERT_TRUE(NULL != strstr(second, "|a.txt|"));
+	ASSERT_TRUE(NULL != strstr(second, "|b.txt|"));
+
+	test_peer_destroy(&peer);
+}
+
+UTEST(file_server, listing_a_file_handle_reports_not_a_directory)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	rl_msg_t request, reply;
+	char root[256];
+
+	test_controller_init(&ctl, root, sizeof(root));
+	write_file(root, "hello.txt", "hi");
+	test_peer_init(&peer, &ctl);
+
+	open_request(&request, "hello.txt", RL_OPENFLAG_READ);
+	rl_file_serve(&peer, &request);
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+
+	RL_MSG_INIT(request, RL_MSG_FIND_NEXT_FILE_REQUEST);
+	request.find_next_file_request.handle = reply.open_handle_answer.handle;
+	request.find_next_file_request.reset = 1;
+	rl_file_serve(&peer, &request);
+
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ(RL_MSG_ERROR_ANSWER, (int)rl_msg_kind_of(&reply));
+	ASSERT_EQ((rl_uint32)RL_NETERR_NOT_A_DIRECTORY, reply.error_answer.error_code);
+
+	test_peer_destroy(&peer);
+}
+
+#if defined(RL_POSIX)
+/*
+ * A dangling symlink cannot be stat()ed. It used to fail the whole request, so
+ * one broken entry made the entire directory unreadable from the Amiga.
+ */
+UTEST(file_server, an_unstatable_entry_is_skipped_rather_than_failing_the_listing)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	char root[256];
+	char link[512];
+	char names[512];
+
+	test_controller_init(&ctl, root, sizeof(root));
+	write_file(root, "good.txt", "ok");
+	rl_format_msg(link, sizeof(link), "%s/dangling", root);
+	TEST_REQUIRE(0 == symlink("/nonexistent/target", link));
+	test_peer_init(&peer, &ctl);
+
+	ASSERT_EQ(1, list_directory(&peer, (rl_uint32)-1, names, sizeof(names)));
+	ASSERT_TRUE(NULL != strstr(names, "|good.txt|"));
+
+	test_peer_destroy(&peer);
+}
+#endif
 
 UTEST(file_server, an_unhandled_request_replies_with_bad_request)
 {

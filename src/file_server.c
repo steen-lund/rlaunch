@@ -494,6 +494,16 @@ static int close_handle_request(peer_t *peer, const rl_msg_t *msg)
 	return 0;
 }
 
+/*
+ * '.' and '..' are the only two entries the Amiga side cannot use: '..' is
+ * rejected outright by escapes_root(). Everything else, dotfiles included,
+ * belongs in the listing, so both hosts must filter exactly these two.
+ */
+static int is_dot_entry(const char *name)
+{
+	return '.' == name[0] && ('\0' == name[1] || ('.' == name[1] && '\0' == name[2]));
+}
+
 static int find_next_file_request(peer_t *peer, const rl_msg_t *msg)
 {
 	rl_controller_t * const self = (rl_controller_t *) peer->userdata;
@@ -544,7 +554,7 @@ static int find_next_file_request(peer_t *peer, const rl_msg_t *msg)
 			else
 				has_file = FindNextFile(handle->find_handle, &find_data);
 		}
-	} while (has_file && '.' == find_data.cFileName[0]);
+	} while (has_file && is_dot_entry(find_data.cFileName));
 
 	RL_MSG_INIT(answer, RL_MSG_FIND_NEXT_FILE_ANSWER);
 	answer.find_next_file_answer.hdr_in_reply_to = msg->find_next_file_request.hdr_sequence_num;
@@ -565,7 +575,6 @@ static int find_next_file_request(peer_t *peer, const rl_msg_t *msg)
 	}
 
 #elif defined(RL_POSIX)
-	/* FIXME: This doesn't filter away '.' and '..' */
 	if (msg->find_next_file_request.reset && handle->dir_handle)
 	{
 		closedir(handle->dir_handle);
@@ -582,43 +591,46 @@ static int find_next_file_request(peer_t *peer, const rl_msg_t *msg)
 	answer.find_next_file_answer.hdr_in_reply_to =
 		msg->find_next_file_request.hdr_sequence_num;
 
-	answer.find_next_file_answer.end_of_sequence = 0;
-
-	// Set errno to zero before calling readdir; errno is not changed at end-of-directory
-	errno = 0;
-
-	if (NULL == (dent = readdir(handle->dir_handle)))
-	{
-		if (0 == errno)
-		{
-			answer.find_next_file_answer.end_of_sequence = 1;
-			answer.find_next_file_answer.type = RL_NODE_TYPE_DIRECTORY;
-			answer.find_next_file_answer.name = "";
-			answer.find_next_file_answer.size = 0;
-		}
-		else
-			return reply_with_error(peer, msg, RL_NETERR_IO_ERROR);
-	}
-	else
+	for (;;)
 	{
 		char item_path[PATH_MAX];
 		rl_strbuf_t path;
 		struct stat stat_buf;
+
+		// Set errno to zero before calling readdir; errno is not changed at end-of-directory
+		errno = 0;
+
+		if (NULL == (dent = readdir(handle->dir_handle)))
+		{
+			if (0 != errno)
+				return reply_with_error(peer, msg, RL_NETERR_IO_ERROR);
+
+			answer.find_next_file_answer.end_of_sequence = 1;
+			answer.find_next_file_answer.type = RL_NODE_TYPE_DIRECTORY;
+			answer.find_next_file_answer.name = "";
+			answer.find_next_file_answer.size = 0;
+			break;
+		}
+
+		if (is_dot_entry(dent->d_name))
+			continue;
 
 		rl_strbuf_init(&path, item_path, sizeof(item_path));
 		rl_strbuf_append(&path, handle->native_path);
 		rl_strbuf_append(&path, "/");
 		rl_strbuf_append(&path, dent->d_name);
 
-		/* FIXME: Maybe we should just ignore the item. */
+		/* A dangling symlink, or an entry unlinked between readdir() and here,
+		 * drops out of the listing rather than failing the whole enumeration. */
 		if (0 != stat(item_path, &stat_buf))
-			return reply_with_error(peer, msg, RL_NETERR_IO_ERROR);
+			continue;
 
 		answer.find_next_file_answer.end_of_sequence = 0;
 		answer.find_next_file_answer.type = S_ISDIR(stat_buf.st_mode) ?
 			RL_NODE_TYPE_DIRECTORY : RL_NODE_TYPE_FILE;
 		answer.find_next_file_answer.name = dent->d_name;
 		answer.find_next_file_answer.size = stat_buf.st_size;
+		break;
 	}
 
 #else
