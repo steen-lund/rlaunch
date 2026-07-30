@@ -360,7 +360,8 @@ UTEST(amigafs, a_locate_answer_we_cannot_hold_gives_the_handle_back)
 
 /* Walk a LOCATE_OBJECT through to its answer and hand back the lock it made,
  * which is the only way to get a lock carrying a real server handle id. */
-static struct FileLock *locate_lock(fs_fixture_t *fix, const char *path, rl_uint32 handle_id, int node_type)
+static struct FileLock *locate_lock_with_mode(fs_fixture_t *fix, const char *path,
+		rl_uint32 handle_id, int node_type, LONG mode)
 {
 	test_packet_t tp;
 	struct DosPacket *packet;
@@ -370,7 +371,7 @@ static struct FileLock *locate_lock(fs_fixture_t *fix, const char *path, rl_uint
 	packet = make_packet(fix, &tp, ACTION_LOCATE_OBJECT);
 	packet->dp_Arg1 = 0;
 	packet->dp_Arg2 = (LONG)make_bstr(name, path);
-	packet->dp_Arg3 = ACCESS_READ;
+	packet->dp_Arg3 = mode;
 	send_packet(fix, &tp);
 
 	TEST_REQUIRE(0 == pop_request(fix, &request));
@@ -385,6 +386,11 @@ static struct FileLock *locate_lock(fs_fixture_t *fix, const char *path, rl_uint
 	TEST_REQUIRE(packet_was_replied(fix));
 	TEST_REQUIRE(0 != packet->dp_Res1);
 	return (struct FileLock *)BADDR(packet->dp_Res1);
+}
+
+static struct FileLock *locate_lock(fs_fixture_t *fix, const char *path, rl_uint32 handle_id, int node_type)
+{
+	return locate_lock_with_mode(fix, path, handle_id, node_type, ACCESS_READ);
 }
 
 UTEST(amigafs, parent_asks_the_controller_to_open_the_parent_directory)
@@ -707,6 +713,168 @@ UTEST(amigafs, a_failed_lock_still_answers_with_dosfalse)
 	ASSERT_TRUE(packet_was_replied(&fix));
 	ASSERT_EQ(0, packet->dp_Res1);
 	ASSERT_NE(0, packet->dp_Res2);
+
+	fixture_destroy(&fix);
+}
+
+/* A FileInfoBlock the handlers can be handed: MKBADDR() drops the low two bits,
+ * so it has to be aligned. */
+typedef union fib_storage_tag
+{
+	struct FileInfoBlock fib;
+	LONG alignment;
+} fib_storage_t;
+
+UTEST(amigafs, examine_names_only_the_final_path_component)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	struct FileLock *lock;
+	fib_storage_t storage;
+
+	fixture_init(&fix);
+	lock = locate_lock(&fix, "dir/hello.txt", 7, RL_NODE_TYPE_FILE);
+
+	memset(&storage, 0, sizeof(storage));
+	packet = make_packet(&fix, &tp, ACTION_EXAMINE_OBJECT);
+	packet->dp_Arg1 = (LONG)MKBADDR(lock);
+	packet->dp_Arg2 = (LONG)MKBADDR(&storage.fib);
+	send_packet(&fix, &tp);
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ((LONG)DOSTRUE, packet->dp_Res1);
+
+	/* A caller that rebuilds a path from the parent plus this name gets
+	 * DEV:dir/dir/hello.txt when the whole path is handed back here. */
+	ASSERT_EQ(9, (int)(unsigned char)storage.fib.fib_FileName[0]);
+	ASSERT_STREQ("hello.txt", (const char *)storage.fib.fib_FileName + 1);
+
+	/* ExNext() fills both in, so a caller reading fib_EntryType off an
+	 * Examine() must not see the zero a memset left behind. */
+	ASSERT_EQ(-1L, storage.fib.fib_DirEntryType);
+	ASSERT_EQ(storage.fib.fib_DirEntryType, storage.fib.fib_EntryType);
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, examine_next_on_a_null_lock_is_answered)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+	fib_storage_t storage;
+	rl_msg_t request;
+
+	fixture_init(&fix);
+
+	/* DOS hands the handler a NULL lock for the volume root; reading a handle
+	 * out of it faulted. */
+	memset(&storage, 0, sizeof(storage));
+	packet = make_packet(&fix, &tp, ACTION_EXAMINE_NEXT);
+	packet->dp_Arg1 = 0;
+	packet->dp_Arg2 = (LONG)MKBADDR(&storage.fib);
+	send_packet(&fix, &tp);
+
+	ASSERT_EQ(0, pop_request(&fix, &request));
+	ASSERT_EQ(RL_MSG_FIND_NEXT_FILE_REQUEST, (int)rl_msg_kind_of(&request));
+
+	fixture_destroy(&fix);
+}
+
+/* Start an enumeration on a root lock and answer the handle open it needs,
+ * returning the id the following FIND_NEXT_FILE_REQUEST carried. */
+static rl_uint32 begin_root_enumeration(fs_fixture_t *fix, struct FileLock *root,
+		test_packet_t *tp, fib_storage_t *storage, rl_uint32 handle_id)
+{
+	struct DosPacket *packet;
+	rl_msg_t request, answer;
+
+	memset(storage, 0, sizeof(*storage));
+	packet = make_packet(fix, tp, ACTION_EXAMINE_NEXT);
+	packet->dp_Arg1 = (LONG)MKBADDR(root);
+	packet->dp_Arg2 = (LONG)MKBADDR(&storage->fib);
+	send_packet(fix, tp);
+
+	TEST_REQUIRE(0 == pop_request(fix, &request));
+	TEST_REQUIRE(RL_MSG_OPEN_HANDLE_REQUEST == rl_msg_kind_of(&request));
+
+	RL_MSG_INIT(answer, RL_MSG_OPEN_HANDLE_ANSWER);
+	answer.open_handle_answer.hdr_in_reply_to = request.open_handle_request.hdr_sequence_num;
+	answer.open_handle_answer.handle = handle_id;
+	answer.open_handle_answer.type = RL_NODE_TYPE_DIRECTORY;
+	answer.open_handle_answer.size = 0;
+	rl_amigafs_process_network_message(&fix->fs, &answer);
+
+	TEST_REQUIRE(0 == pop_request(fix, &request));
+	TEST_REQUIRE(RL_MSG_FIND_NEXT_FILE_REQUEST == rl_msg_kind_of(&request));
+	return request.find_next_file_request.handle;
+}
+
+UTEST(amigafs, two_root_locks_enumerate_through_handles_of_their_own)
+{
+	fs_fixture_t fix;
+	test_packet_t first_tp, second_tp;
+	fib_storage_t first_fib, second_fib;
+	struct FileLock *first, *second;
+
+	fixture_init(&fix);
+	first = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+	second = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+	ASSERT_TRUE(first != NULL && second != NULL);
+
+	/* The server keeps the directory cursor per handle, so two programs
+	 * listing the volume through one handle silently skip each other's
+	 * entries. */
+	ASSERT_EQ(3u, (unsigned)begin_root_enumeration(&fix, first, &first_tp, &first_fib, 3));
+	ASSERT_EQ(4u, (unsigned)begin_root_enumeration(&fix, second, &second_tp, &second_fib, 4));
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, an_enumerated_root_lock_gives_its_handle_back)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	fib_storage_t storage;
+	struct FileLock *root;
+	rl_msg_t request;
+
+	fixture_init(&fix);
+	root = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+	ASSERT_TRUE(root != NULL);
+
+	/* Before it enumerates, a root lock names the server's own root handle,
+	 * which closing would take the connection's root away. */
+	rl_amigafs_free_lock(&fix.fs, root);
+	ASSERT_EQ(-1, pop_request(&fix, &request));
+
+	root = rl_amigafs_alloc_root_lock(&fix.fs, SHARED_LOCK);
+	ASSERT_TRUE(root != NULL);
+	ASSERT_EQ(5u, (unsigned)begin_root_enumeration(&fix, root, &tp, &storage, 5));
+
+	rl_amigafs_free_lock(&fix.fs, root);
+	ASSERT_EQ(0, pop_request(&fix, &request));
+	ASSERT_EQ(RL_MSG_CLOSE_HANDLE_REQUEST, (int)rl_msg_kind_of(&request));
+	ASSERT_EQ(5u, (unsigned)request.close_handle_request.handle);
+
+	fixture_destroy(&fix);
+}
+
+UTEST(amigafs, a_lock_keeps_the_access_mode_it_was_asked_for)
+{
+	fs_fixture_t fix;
+	struct FileLock *shared, *exclusive;
+
+	fixture_init(&fix);
+
+	shared = locate_lock(&fix, "hello.txt", 7, RL_NODE_TYPE_FILE);
+	ASSERT_EQ((LONG)SHARED_LOCK, shared->fl_Access);
+
+	/* Zero is neither SHARED_LOCK nor EXCLUSIVE_LOCK; anything reading
+	 * fl_Access sees a value DOS has no meaning for. */
+	exclusive = locate_lock_with_mode(&fix, "hello.txt", 8, RL_NODE_TYPE_FILE, ACCESS_WRITE);
+	ASSERT_EQ((LONG)EXCLUSIVE_LOCK, exclusive->fl_Access);
 
 	fixture_destroy(&fix);
 }

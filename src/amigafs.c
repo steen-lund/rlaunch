@@ -25,6 +25,12 @@
 
 #define HANDLE_FROM_LOCK(lock) ((rl_client_handle_t*) (lock)->fl_Key)
 
+/* The id every root lock starts out with: it names the server's own root
+ * handle, which no client owns and which must never be closed. */
+#define RL_ROOT_HANDLE_ID ((rl_uint32) -1)
+
+#define IS_ROOT_HANDLE(handle) (RL_HANDLE_DEVICE == (handle)->type)
+
 static LONG translate_error_code(rl_uint32 error_code);
 static LONG failed_res1(const rl_pending_operation_t *op);
 static const char* get_packet_type_name(const struct DosPacket* packet);
@@ -101,7 +107,7 @@ static LONG normalize_object_path(
 		}
 	}
 
-	if (&fs->root_handle != handle)
+	if (!IS_ROOT_HANDLE(handle))
 	{
 		/* Joining adds a separator, so check the total before formatting:
 		 * rl_format_msg truncates silently. */
@@ -179,6 +185,24 @@ static void construct_bstr(char *start, LONG max_size, const char *input)
 	}
 
 	*start = '\0';
+}
+
+/*
+ * Handles keep the whole path so relative lookups can be built from it, but
+ * fib_FileName is only the final component: a caller rebuilding a path from a
+ * parent plus what Examine() gave it would otherwise repeat the directories.
+ */
+static const char *final_component(const char *path)
+{
+	const char *name = path, *cursor;
+
+	for (cursor = path; *cursor; ++cursor)
+	{
+		if ('/' == *cursor || ':' == *cursor)
+			name = cursor + 1;
+	}
+
+	return name;
 }
 
 static void unlink_pending(rl_amigafs_t *self, rl_pending_operation_t *target)
@@ -275,28 +299,6 @@ reply_to_packet(rl_amigafs_t *self, struct DosPacket *packet)
 	return 0;
 }
 
-struct FileLock* rl_amigafs_alloc_root_lock(rl_amigafs_t *self, long mode)
-{
-	struct FileLock *lock = NULL;
-
-   	if (NULL == (lock = RL_ALLOC_TYPED_ZERO(struct FileLock)))
-		goto error;
-
-	RL_LOG_DEBUG(("Allocated lock %p for root", lock));
-
-	lock->fl_Access = mode;
-	lock->fl_Key = (LONG) &self->root_handle;
-	lock->fl_Task = self->device_port;
-	lock->fl_Volume = MKBADDR(self->device_list);
-	return lock;
-
-error:
-	if (lock)
-		RL_FREE_TYPED(struct FileLock, lock);
-
-	return NULL;
-}
-
 static struct FileLock *allocate_lock(
 		rl_amigafs_t *fs,
 		rl_client_handle_type_t type,
@@ -335,6 +337,18 @@ error:
 		RL_FREE_TYPED(rl_client_handle_t, lock);
 
 	return NULL;
+}
+
+/*
+ * A lock on the volume root. Each one gets a handle of its own rather than
+ * sharing a single root handle, because the server tracks the directory cursor
+ * per handle: two programs listing the volume through one handle would consume
+ * each other's entries. The server handle itself is opened lazily, by the first
+ * enumeration that needs one.
+ */
+struct FileLock* rl_amigafs_alloc_root_lock(rl_amigafs_t *self, long mode)
+{
+	return allocate_lock(self, RL_HANDLE_DEVICE, RL_ROOT_HANDLE_ID, mode, self->root_handle.path, 0);
 }
 
 /* A second lock on an object already locked: both share the one server handle,
@@ -393,11 +407,13 @@ void rl_amigafs_free_lock(rl_amigafs_t *fs, struct FileLock *lock)
 
 	RL_ASSERT(handle);
 
-	/* Don't free the device handle (it lives inside the amigafs struct), and
-	 * don't close a handle a duplicate of this lock is still using. */
-	if (RL_HANDLE_DEVICE != handle->type && 0 == --handle->refcount)
+	/* Don't close a handle a duplicate of this lock is still using, and don't
+	 * ask the server to close its own root handle: a root lock carries that id
+	 * until an enumeration opens one of its own. */
+	if (0 == --handle->refcount)
 	{
-		transmit_close_handle(fs, handle->handle_id);
+		if (RL_ROOT_HANDLE_ID != handle->handle_id)
+			transmit_close_handle(fs, handle->handle_id);
 		RL_FREE_TYPED(rl_client_handle_t, handle);
 	}
 
@@ -755,7 +771,7 @@ static void action_examine_object(rl_amigafs_t *fs, struct DosPacket *packet)
 	if (!handle)
 		handle = &fs->root_handle;
 
-	if (&fs->root_handle == handle)
+	if (IS_ROOT_HANDLE(handle))
 	{
 		rl_memset(fib, 0, sizeof(*fib));
 		fib->fib_DiskKey = 0L;
@@ -786,7 +802,8 @@ static void action_examine_object(rl_amigafs_t *fs, struct DosPacket *packet)
 		rl_memset(fib, 0, sizeof(*fib));
 		fib->fib_DiskKey = 0L;
 		fib->fib_DirEntryType = RL_HANDLE_FILE == handle->type ? -1 : 1;
-		construct_bstr(fib->fib_FileName, sizeof(fib->fib_FileName), handle->path);
+		fib->fib_EntryType = fib->fib_DirEntryType;
+		construct_bstr(fib->fib_FileName, sizeof(fib->fib_FileName), final_component(handle->path));
 		fib->fib_Size = handle->size_lo;
 		fib->fib_NumBlocks = handle->size_lo;
 		fib->fib_Comment[0] = '\0';
@@ -807,13 +824,38 @@ static void action_examine_object(rl_amigafs_t *fs, struct DosPacket *packet)
  *	RES2:	Failure code if RES1 = DOSFALSE
  */
 static void complete_examine_next(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg);
+static void complete_root_enum_open(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg);
+
 static void action_examine_next(rl_amigafs_t *fs, struct DosPacket *packet)
 {
 	struct FileLock *lock = BCPL_CAST(struct FileLock, packet->dp_Arg1);
-	rl_client_handle_t *handle = HANDLE_FROM_LOCK(lock);
+	/* DOS produces a NULL lock for the volume root, the same case
+	 * action_examine_object() handles. */
+	rl_client_handle_t *handle = lock ? HANDLE_FROM_LOCK(lock) : &fs->root_handle;
 	rl_msg_t msg;
 	rl_pending_operation_t *pending_op = NULL;
 	LONG error_code;
+
+	/* A root lock still naming the server's root handle would enumerate through
+	 * the cursor every other root lock uses. Open a handle for this lock first
+	 * and let its completion restart the enumeration. */
+	if (lock && RL_ROOT_HANDLE_ID == handle->handle_id)
+	{
+		pending_op = alloc_pending(fs, packet, RL_MSG_OPEN_HANDLE_ANSWER, complete_root_enum_open);
+		if (!pending_op)
+		{
+			error_code = ERROR_NO_FREE_STORE;
+			goto error;
+		}
+
+		if (0 != transmit_open_handle_request(fs, pending_op, ""))
+		{
+			error_code = ERROR_NOT_A_DOS_DISK;
+			goto error;
+		}
+
+		return;
+	}
 
 	pending_op = alloc_pending(fs, packet, RL_MSG_FIND_NEXT_FILE_ANSWER, complete_examine_next);
 	if (!pending_op)
@@ -824,7 +866,7 @@ static void action_examine_next(rl_amigafs_t *fs, struct DosPacket *packet)
 
 	RL_MSG_INIT(msg, RL_MSG_FIND_NEXT_FILE_REQUEST);
 	msg.find_next_file_request.hdr_sequence_num	= pending_op->request_seqno;
-	msg.find_next_file_request.handle = HANDLE_FROM_LOCK(lock)->handle_id;
+	msg.find_next_file_request.handle = handle->handle_id;
 	msg.find_next_file_request.reset =
 		(handle->flags & RL_CLIENT_FLAG_FILE_ENUM_IN_PROGRESS) ? 0 : 1;
 
@@ -851,7 +893,7 @@ static void complete_examine_next(rl_amigafs_t *fs, rl_pending_operation_t *op, 
 	struct DosPacket * const packet = op->input_packet;
 	struct FileLock * const lock = BCPL_CAST(struct FileLock, packet->dp_Arg1);
 	struct FileInfoBlock * const fib = BCPL_CAST(struct FileInfoBlock, packet->dp_Arg2);
-	rl_client_handle_t *handle = HANDLE_FROM_LOCK(lock);
+	rl_client_handle_t *handle = lock ? HANDLE_FROM_LOCK(lock) : &fs->root_handle;
 	const rl_msg_find_next_file_answer_t * const answer = &msg->find_next_file_answer;
 	
 	if (answer->end_of_sequence)
@@ -880,6 +922,28 @@ static void complete_examine_next(rl_amigafs_t *fs, rl_pending_operation_t *op, 
 
 	reply_to_packet(fs, packet);
 	unlink_pending(fs, op);
+}
+
+/* The root lock now has a server handle of its own; run the enumeration the
+ * packet came in for through it. */
+static void complete_root_enum_open(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg)
+{
+	struct DosPacket * const packet = op->input_packet;
+	struct FileLock * const lock = BCPL_CAST(struct FileLock, packet->dp_Arg1);
+
+	unlink_pending(fs, op);
+
+	if (RL_NODE_TYPE_DIRECTORY != msg->open_handle_answer.type)
+	{
+		transmit_close_handle(fs, msg->open_handle_answer.handle);
+		packet->dp_Res1 = DOSFALSE;
+		packet->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+		reply_to_packet(fs, packet);
+		return;
+	}
+
+	HANDLE_FROM_LOCK(lock)->handle_id = msg->open_handle_answer.handle;
+	action_examine_next(fs, packet);
 }
 
 /* Helper function to populate a InfoData struct from the specified fs. */
@@ -933,7 +997,7 @@ static void action_info(rl_amigafs_t *fs, struct DosPacket *packet)
 		packet->dp_Res1 = DOSFALSE;
 		packet->dp_Res2 = ERROR_INVALID_LOCK;
 	}
-	else if (HANDLE_FROM_LOCK(lock) == &fs->root_handle)
+	else if (IS_ROOT_HANDLE(HANDLE_FROM_LOCK(lock)))
 	{
 		fill_in_infodata(fs, BCPL_CAST(struct InfoData, packet->dp_Arg2));
 		packet->dp_Res1 = DOSTRUE;
@@ -1095,7 +1159,10 @@ static void complete_locate_object(rl_amigafs_t *fs, rl_pending_operation_t *op,
 		return;
 	}
 
-	complete_lock_from_answer(fs, op, msg, full_path, 0);
+	/* Hand back the mode the caller asked for. Anything but ACCESS_WRITE is a
+	 * shared lock; fl_Access has no third value. */
+	complete_lock_from_answer(fs, op, msg, full_path,
+			EXCLUSIVE_LOCK == packet->dp_Arg3 ? EXCLUSIVE_LOCK : SHARED_LOCK);
 }
 
 
@@ -1257,7 +1324,7 @@ static void action_parent(rl_amigafs_t *fs, struct DosPacket *packet)
 
 	RL_LOG_DEBUG(("ACTION_PARENT for lock %p (%d)", lock, handle ? (int) handle->handle_id : -1));
 
-	if (NULL == handle || &fs->root_handle == handle)
+	if (NULL == handle || IS_ROOT_HANDLE(handle))
 	{
 		RL_LOG_DEBUG(("[The root handle (or null handle) doesn't have a parent]"));
 		packet->dp_Res1 = DOSFALSE;
@@ -1828,7 +1895,7 @@ int rl_amigafs_init(rl_amigafs_t *self, peer_t *peer, const char *device_name)
 
 	self->peer = peer;
 	self->root_handle.type = RL_HANDLE_DEVICE;
-	self->root_handle.handle_id = (rl_uint32) -1;
+	self->root_handle.handle_id = RL_ROOT_HANDLE_ID;
 	rl_string_copy(sizeof(self->root_handle.path), self->root_handle.path, device_name);
 
 	if (NULL == (self->device_port = CreateMsgPort()))
