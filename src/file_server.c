@@ -69,7 +69,21 @@ static rl_filehandle_t *get_handle_from_id(rl_controller_t *self, peer_t *peer, 
 	}
 	else
 	{
-		return &self->handles[handle_id];
+		rl_filehandle_t * const handle = &self->handles[handle_id];
+
+		/* A free or closed slot keeps the type, path and size of whatever last
+		 * used it; only the handle field says the slot is unused. The virtual
+		 * input handle, which legitimately holds descriptor 0, is served above. */
+#if defined(RL_WIN32)
+		if (NULL == handle->handle)
+			return NULL;
+#elif defined(RL_POSIX)
+		if (0 == handle->handle)
+			return NULL;
+#else
+#error "Implement me."
+#endif
+		return handle;
 	}
 }
 
@@ -694,13 +708,10 @@ static int read_file_request(peer_t *peer, const rl_msg_t *msg)
 	}
 
 #elif defined(RL_POSIX)
-	/* Directory handles hold -1 and free or closed slots hold 0, which is also
-	 * stdin's descriptor - so only the virtual input handle may read from it. */
+	/* Directory handles hold -1; free and closed slots are rejected by
+	 * get_handle_from_id() above. */
 	if (RL_NODE_TYPE_FILE != handle->type)
 		return reply_with_error(peer, msg, RL_NETERR_NOT_A_FILE);
-
-	if (0 == handle->handle && handle != &self->vinput_handle)
-		return reply_with_error(peer, msg, RL_NETERR_INVALID_VALUE);
 
 	{
 		ssize_t read_size;

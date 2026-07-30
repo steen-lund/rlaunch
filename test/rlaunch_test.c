@@ -926,6 +926,66 @@ UTEST(file_server, listing_a_file_handle_reports_not_a_directory)
 	test_peer_destroy(&peer);
 }
 
+/*
+ * A closed slot keeps the type and path of whatever last used it, so a listing
+ * of it used to re-enumerate the directory the peer had already given up.
+ */
+UTEST(file_server, listing_a_closed_handle_replies_with_an_error)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	rl_msg_t request, reply;
+	char root[256];
+	rl_uint32 handle;
+
+	test_controller_init(&ctl, root, sizeof(root));
+	make_sub_dir(root, "sub");
+	test_peer_init(&peer, &ctl);
+
+	open_request(&request, "sub", RL_OPENFLAG_READ);
+	rl_file_serve(&peer, &request);
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	handle = reply.open_handle_answer.handle;
+
+	RL_MSG_INIT(request, RL_MSG_CLOSE_HANDLE_REQUEST);
+	request.close_handle_request.handle = handle;
+	rl_file_serve(&peer, &request);
+
+	RL_MSG_INIT(request, RL_MSG_FIND_NEXT_FILE_REQUEST);
+	request.find_next_file_request.handle = handle;
+	request.find_next_file_request.reset = 1;
+	rl_file_serve(&peer, &request);
+
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ(RL_MSG_ERROR_ANSWER, (int)rl_msg_kind_of(&reply));
+	ASSERT_EQ((rl_uint32)RL_NETERR_INVALID_VALUE, reply.error_answer.error_code);
+
+	test_peer_destroy(&peer);
+}
+
+/* A slot nothing ever opened has the same stale-state problem. */
+UTEST(file_server, listing_a_never_opened_handle_replies_with_an_error)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	rl_msg_t request, reply;
+	char root[256];
+
+	test_controller_init(&ctl, root, sizeof(root));
+	test_peer_init(&peer, &ctl);
+
+	RL_MSG_INIT(request, RL_MSG_FIND_NEXT_FILE_REQUEST);
+	request.find_next_file_request.handle = 0;
+	request.find_next_file_request.reset = 1;
+	rl_file_serve(&peer, &request);
+
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ(RL_MSG_ERROR_ANSWER, (int)rl_msg_kind_of(&reply));
+	ASSERT_EQ((rl_uint32)RL_NETERR_INVALID_VALUE, reply.error_answer.error_code);
+
+	test_peer_destroy(&peer);
+}
+
 #if defined(RL_POSIX)
 /*
  * A dangling symlink cannot be stat()ed. It used to fail the whole request, so
