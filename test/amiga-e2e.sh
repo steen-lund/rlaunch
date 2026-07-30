@@ -75,22 +75,42 @@ for i in $(seq 1 45); do
 	fi
 done
 
-echo "== launching the payload on the Amiga =="
-set +e
-OUTPUT=$(timeout 120 "$BUILD/rl-controller" -fsroot "$WORK/fsroot" 127.0.0.1 rl-payload 2>&1)
-STATUS=$?
-set -e
+launch() {
+	set +e
+	OUTPUT=$(timeout 120 "$BUILD/rl-controller" -fsroot "$WORK/fsroot" 127.0.0.1 rl-payload "$@" 2>&1)
+	STATUS=$?
+	set -e
+	echo "$OUTPUT"
+	echo "== controller exit: $STATUS =="
+}
 
-echo "$OUTPUT"
-echo "== controller exit: $STATUS =="
+expect_output() {
+	case "$OUTPUT" in
+		*"$1"*) ;;
+		*) echo "FAIL: $2"; exit 1 ;;
+	esac
+}
+
+echo "== launching the payload on the Amiga =="
+launch
 
 if [ "$STATUS" -ne 0 ]; then
 	echo "FAIL: controller exited $STATUS (124 means the Amiga side hung)"
 	exit 1
 fi
-case "$OUTPUT" in
-	*'read back "hello from the host"'*) ;;
-	*) echo "FAIL: payload did not read the served file back"; exit 1 ;;
-esac
+expect_output 'read back "hello from the host"' "payload did not read the served file back"
+expect_output 'seek read back "from the host"' "payload did not read the file back after a Seek()"
+expect_output 'listed hello.txt and rl-payload' "payload did not enumerate the served directory"
 
-echo "PASS: controller launched the payload on the Amiga, it read a served file, and the exit code came back"
+# Same launch, but the payload returns 42. Anything else means the remote
+# return code did not survive the trip -- including the 0 the first run gave
+# us, which on its own proves nothing (#37).
+echo "== launching the payload in failure mode =="
+launch fail
+
+if [ "$STATUS" -ne 42 ]; then
+	echo "FAIL: controller exited $STATUS, wanted the payload's 42 (124 means the Amiga side hung)"
+	exit 1
+fi
+
+echo "PASS: the payload read, seeked and listed over the wire, and both its return codes came back"
