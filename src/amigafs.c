@@ -34,7 +34,7 @@
 static LONG translate_error_code(rl_uint32 error_code);
 static LONG failed_res1(const rl_pending_operation_t *op);
 static const char* get_packet_type_name(const struct DosPacket* packet);
-static void construct_bstr(char *start, LONG max_size, const char *input);
+static void construct_bstr(char *start, size_t max_size, const char *input);
 
 static const char *rl_client_handle_type_name(rl_client_handle_type_t type)
 {
@@ -166,16 +166,17 @@ static rl_pending_operation_t *alloc_pending(rl_amigafs_t *self, struct DosPacke
 	return op;
 }
 
-static void construct_bstr(char *start, LONG max_size, const char *input)
+static void construct_bstr(char *start, size_t max_size, const char *input)
 {
 	size_t len = rl_strlen(input);
 
 	/* Reserve space for the size byte, and the trailing null termination for
-	 * certain DOS BSTRs */
-	max_size -= 2;
+	 * certain DOS BSTRs. size_t throughout: a LONG max_size promoted to
+	 * unsigned in the clamp below, so the guard only looked like it worked. */
+	const size_t avail = max_size > 2 ? max_size - 2 : 0;
 
-	if (len > max_size)
-		len = max_size;
+	if (len > avail)
+		len = avail;
 
 	*start++ = (char) len;
 
@@ -334,7 +335,7 @@ error:
 	if (lock)
 		RL_FREE_TYPED(struct FileLock, lock);
 	if (handle)
-		RL_FREE_TYPED(rl_client_handle_t, lock);
+		RL_FREE_TYPED(rl_client_handle_t, handle);
 
 	return NULL;
 }

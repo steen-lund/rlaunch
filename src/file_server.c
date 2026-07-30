@@ -601,7 +601,7 @@ static int find_next_file_request(peer_t *peer, const rl_msg_t *msg)
 	}
 	else
 	{
-		char item_path[NAME_MAX];
+		char item_path[PATH_MAX];
 		rl_strbuf_t path;
 		struct stat stat_buf;
 

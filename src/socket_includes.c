@@ -55,10 +55,12 @@ int rl_configure_socket_blocking(rl_socket_t s, int should_block)
 	return IoctlSocket(s, FIONBIO, (char*) &value);
 #else
 	const int flags = fcntl(s, F_GETFL);
+	if (-1 == flags)
+		return -1;
 	if (should_block)
-		return fcntl(s, flags & ~(O_NONBLOCK));
+		return fcntl(s, F_SETFL, flags & ~(O_NONBLOCK));
 	else
-		return fcntl(s, flags | (O_NONBLOCK));
+		return fcntl(s, F_SETFL, flags | (O_NONBLOCK));
 #endif
 }
 
