@@ -158,6 +158,10 @@ static __saveds ULONG cmd_launcher(void)
 	CurrentDir(old_dir);
 	UnLock(MKBADDR(launch_msg->root_lock));
 
+	/* Ours no longer; the parent frees whatever is still set when it reaps
+	 * the reply, which is how the early-exit paths above stay leak-free. */
+	launch_msg->root_lock = 0;
+
 	RL_LOG_DEBUG(("[thread] command %s completed with code %d",
 				  launch_msg->command_path, launch_msg->result_code));
 
@@ -473,6 +477,11 @@ static void serve(const rl_socket_t server_fd)
 				if (!peer)
 				{
 					RL_LOG_WARNING(("couldn't find peer to notify about completed exe launch %s", msg->command_path));
+				}
+				else if (msg->root_lock)
+				{
+					/* The launcher bailed out before it could unlock. */
+					rl_amigafs_free_lock((rl_amigafs_t *) peer->userdata, msg->root_lock);
 				}
 
 				RL_FREE_TYPED(launch_msg_t, msg);

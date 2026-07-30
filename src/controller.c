@@ -391,7 +391,7 @@ int main(int argc, char** argv)
 				ctrl.executable = this_arg;
 				options_done = 1;
 			}
-			else if (options_done && ctrl.arg_count < sizeof(ctrl.arguments)/sizeof(ctrl.arguments[0]))
+			else if (options_done && ctrl.arg_count < (int) (sizeof(ctrl.arguments)/sizeof(ctrl.arguments[0])))
 			{
 				RL_LOG_DEBUG(("arg%d = %s", ctrl.arg_count, this_arg));
 				ctrl.arguments[ctrl.arg_count++] = this_arg;
@@ -425,11 +425,18 @@ int main(int argc, char** argv)
 	}
 	else
 	{
+		/* A failure here leaves the buffer unspecified, and the controller
+		 * would go on to serve whatever happened to be in it. */
 #ifdef RL_WIN32
-		GetCurrentDirectoryA(sizeof(ctrl.root_handle.native_path), ctrl.root_handle.native_path);
+		DWORD dirlen = GetCurrentDirectoryA(sizeof(ctrl.root_handle.native_path), ctrl.root_handle.native_path);
+		if (0 == dirlen || dirlen >= sizeof(ctrl.root_handle.native_path))
 #else
-		getcwd(ctrl.root_handle.native_path, sizeof(ctrl.root_handle.native_path));
+		if (NULL == getcwd(ctrl.root_handle.native_path, sizeof(ctrl.root_handle.native_path)))
 #endif
+		{
+			RL_LOG_CONSOLE(("couldn't determine the current directory; pass -fsroot <path>\n"));
+			goto cleanup;
+		}
 	}
 
 	/* make sure root path stored doesn't contain a path separator */
