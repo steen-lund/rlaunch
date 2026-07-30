@@ -110,12 +110,14 @@ static int pop_reply(peer_t *peer, rl_msg_t *out)
 	return result;
 }
 
+/* Real teardown, so the peer index is released like it is in production. The
+ * fd is INVALID_SOCKET; closing that is a no-op that only sets errno. */
 static void test_peer_destroy(peer_t *peer)
 {
 	rl_msg_t drain;
 	while (0 == pop_reply(peer, &drain))
 		;
-	rl_transport_destroy(&peer->transport);
+	peer_destroy(peer);
 }
 
 static void make_temp_dir(char *out, size_t out_size)
@@ -864,6 +866,52 @@ UTEST(transport_framing, an_undersized_declared_length_is_an_error)
 	ASSERT_EQ(RL_TRANSPORT_ERROR, rl_transport_update(&peer.transport));
 
 	test_peer_destroy(&peer);
+}
+
+/* -------------------------------------------------------------------------
+ * peer index
+ * ------------------------------------------------------------------------- */
+
+UTEST(peer_index, live_peers_never_share_an_index)
+{
+	static const peer_callbacks_t callbacks = { stub_on_message, stub_on_connected };
+	peer_t peers[10];
+	peer_t overflow, reused;
+	rl_controller_t ctl;
+	struct sockaddr_in addr;
+	unsigned int seen = 0;
+	int freed, i;
+
+	rl_memset(&ctl, 0, sizeof(ctl));
+	rl_memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+
+	for (i = 0; i < 10; ++i)
+	{
+		test_peer_init(&peers[i], &ctl);
+		ASSERT_TRUE(peers[i].peer_index >= 0 && peers[i].peer_index < 10);
+		ASSERT_TRUE(0 == (seen & (1u << peers[i].peer_index)));
+		seen |= 1u << peers[i].peer_index;
+	}
+
+	/* All ten slots are live, so an eleventh connection has to be refused
+	 * rather than handed a duplicate index. */
+	ASSERT_NE(0, peer_init(&overflow, INVALID_SOCKET, (const struct sockaddr *)&addr,
+			&callbacks, PEER_INIT_TARGET, &ctl));
+
+	/* Disconnecting returns the slot to the pool. */
+	freed = peers[3].peer_index;
+	test_peer_destroy(&peers[3]);
+
+	test_peer_init(&reused, &ctl);
+	ASSERT_EQ(freed, reused.peer_index);
+	test_peer_destroy(&reused);
+
+	for (i = 0; i < 10; ++i)
+	{
+		if (3 != i)
+			test_peer_destroy(&peers[i]);
+	}
 }
 
 /* -------------------------------------------------------------------------

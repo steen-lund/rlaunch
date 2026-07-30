@@ -110,14 +110,19 @@ static __saveds ULONG cmd_launcher(void)
 
 	SysBase = *((struct ExecBase**) 4);
 
-	if (!(DOSBase = (struct DosLibrary *) OpenLibrary("dos.library", 37)))
-		goto leave;
-
-	/* Wait for the launch message to arrive. */
+	/* Receive the launch message before anything that can fail, so that every
+	 * exit path from here on replies to the parent. Bailing out with the
+	 * message still queued strands it and hangs the controller forever. */
 	{
 		struct Process* this_proc = (struct Process *) FindTask(NULL);
 		WaitPort(&this_proc->pr_MsgPort);
 		launch_msg = (launch_msg_t*) GetMsg(&this_proc->pr_MsgPort);
+	}
+
+	if (!(DOSBase = (struct DosLibrary *) OpenLibrary("dos.library", 37)))
+	{
+		launch_msg->result_code = 1;
+		goto leave;
 	}
 
 	/* Open input and output file handles */
@@ -153,10 +158,10 @@ static __saveds ULONG cmd_launcher(void)
 	if (ihandle) Close(ihandle);
 	if (ohandle) Close(ohandle);
 
+leave:
 	/* Reply to parent with result of the execution. */
 	ReplyMsg((struct Message*) launch_msg);
 
-leave:
 	if (DOSBase)
 		CloseLibrary((struct Library*) DOSBase);
 	return 0;
@@ -435,30 +440,35 @@ static void serve(const rl_socket_t server_fd)
 
 		if (signal_mask & (1 << g_process_msg_port->mp_SigBit))
 		{
-			launch_msg_t *msg = (launch_msg_t*) GetMsg(g_process_msg_port);
-			peer_t *peer = peers;
-
-			RL_LOG_INFO(("%s launch completed; result %d", msg->command_path, msg->result_code));
-
-			while (peer)
+			/* Two replies can coalesce into one signal, so drain the port
+			 * rather than assuming exactly one message is waiting. */
+			launch_msg_t *msg;
+			while (NULL != (msg = (launch_msg_t*) GetMsg(g_process_msg_port)))
 			{
-				if (peer->peer_index == msg->peer_index)
+				peer_t *peer = peers;
+
+				RL_LOG_INFO(("%s launch completed; result %d", msg->command_path, msg->result_code));
+
+				while (peer)
 				{
-					rl_msg_t req;
-					RL_MSG_INIT(req, RL_MSG_EXECUTABLE_DONE_REQUEST);
-					req.executable_done_request.result_code = msg->result_code;
-					peer_transmit_message(peer, &req);
-					break;
+					if (peer->peer_index == msg->peer_index)
+					{
+						rl_msg_t req;
+						RL_MSG_INIT(req, RL_MSG_EXECUTABLE_DONE_REQUEST);
+						req.executable_done_request.result_code = msg->result_code;
+						peer_transmit_message(peer, &req);
+						break;
+					}
+					peer = peer->next;
 				}
-				peer = peer->next;
-			}
-			
-			if (!peer)
-			{
-				RL_LOG_WARNING(("couldn't find peer to notify about completed exe launch %s", msg->command_path));
-			}
 
-			RL_FREE_TYPED(launch_msg_t, msg);
+				if (!peer)
+				{
+					RL_LOG_WARNING(("couldn't find peer to notify about completed exe launch %s", msg->command_path));
+				}
+
+				RL_FREE_TYPED(launch_msg_t, msg);
+			}
 		}
 #endif
 
@@ -544,6 +554,14 @@ static void common_main(const char *bind_address, int bind_port)
 
 	listener_fd = socket(PF_INET, SOCK_STREAM, 0);
 
+	if (INVALID_SOCKET == listener_fd)
+	{
+		RL_LOG_CONSOLE(("Couldn't create main socket"));
+		goto cleanup;
+	}
+
+	RL_LOG_DEBUG(("server socket created (fd=%d)", listener_fd));
+
 	{
 		long value = 1;
 		if (0 != setsockopt(listener_fd, SOL_SOCKET, SO_REUSEADDR, (const char*) &value, sizeof(value)))
@@ -552,14 +570,6 @@ static void common_main(const char *bind_address, int bind_port)
 			goto cleanup;
 		}
 	}
-
-	if (INVALID_SOCKET == listener_fd)
-	{
-		RL_LOG_CONSOLE(("Couldn't create main socket"));
-		goto cleanup;
-	}
-
-	RL_LOG_DEBUG(("server socket created (fd=%d)", listener_fd));
 
 	rl_memset(&listen_address, 0, sizeof(listen_address));
 	listen_address.sin_family = AF_INET;

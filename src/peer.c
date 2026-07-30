@@ -417,7 +417,32 @@ static const rl_transport_callbacks_t peer_transport_callbacks =
 	peer_deliver_incoming
 };
 
-static int peer_count = 0;
+/* Peer indices name the Amiga device (TBL<n>) and route launch completions to
+ * the right connection, so they must be unique among *live* peers -- handing
+ * the same index to two of them crosses both. Ten slots, tracked in a bitmask
+ * and released in peer_destroy(). */
+#define PEER_INDEX_COUNT 10
+static unsigned int peer_index_used = 0;
+
+static int alloc_peer_index(void)
+{
+	int i;
+	for (i = 0; i < PEER_INDEX_COUNT; ++i)
+	{
+		if (0 == (peer_index_used & (1u << i)))
+		{
+			peer_index_used |= 1u << i;
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void free_peer_index(int index)
+{
+	if (index >= 0 && index < PEER_INDEX_COUNT)
+		peer_index_used &= ~(1u << index);
+}
 
 int peer_init(
 		peer_t *self,
@@ -440,8 +465,19 @@ int peer_init(
 	RL_ASSERT(self->callbacks.on_message);
 	RL_ASSERT(self->callbacks.on_connected);
 
-	if (0 != rl_transport_init(&self->transport, &peer_transport_callbacks, 32768, self))
+	self->peer_index = alloc_peer_index();
+	if (self->peer_index < 0)
+	{
+		RL_LOG_WARNING(("no free peer index; refusing connection"));
 		return 1;
+	}
+
+	if (0 != rl_transport_init(&self->transport, &peer_transport_callbacks, 32768, self))
+	{
+		free_peer_index(self->peer_index);
+		self->peer_index = -1;
+		return 1;
+	}
 
 	if (AF_INET == address->sa_family)
 	{
@@ -477,14 +513,14 @@ int peer_init(
 		peer_set_state(self, PEER_WAIT_HANDSHAKE);
 	}
 
-	self->peer_index = (peer_count++) % 10; 
-
 	return 0;
 }
 
 void peer_destroy(peer_t *self)
 {
 	RL_LOG_DEBUG(("%s: destroying", self->ident));
+	free_peer_index(self->peer_index);
+	self->peer_index = -1;
 	CloseSocket(self->fd);
 	rl_transport_destroy(&self->transport);
 }
