@@ -300,6 +300,27 @@ reply_to_packet(rl_amigafs_t *self, struct DosPacket *packet)
 	return 0;
 }
 
+/*
+ * Shared tail for the action handlers that may have a pending operation in
+ * flight when they bail out. `res1` differs between them: most report failure
+ * as DOSFALSE, but reads and writes return a byte count where -1 is the
+ * failure signal (zero would read as a clean end of file).
+ */
+static void fail_pending(
+		rl_amigafs_t *self,
+		struct DosPacket *packet,
+		rl_pending_operation_t *pending_op,
+		LONG res1,
+		LONG error_code)
+{
+	if (pending_op)
+		unlink_pending(self, pending_op);
+
+	packet->dp_Res1 = res1;
+	packet->dp_Res2 = error_code;
+	reply_to_packet(self, packet);
+}
+
 static struct FileLock *allocate_lock(
 		rl_amigafs_t *fs,
 		rl_client_handle_type_t type,
@@ -585,12 +606,7 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 	return;
 
 error:
-	if (pending_op)
-		unlink_pending(fs, pending_op);
-
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = error_code;
-	reply_to_packet(fs, packet);
+	fail_pending(fs, packet, pending_op, DOSFALSE, error_code);
 }
 
 static void complete_findinput(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg)
@@ -856,12 +872,7 @@ static void action_examine_next(rl_amigafs_t *fs, struct DosPacket *packet)
 	return;
 
 error:
-	if (pending_op)
-		unlink_pending(fs, pending_op);
-
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = error_code;
-	reply_to_packet(fs, packet);
+	fail_pending(fs, packet, pending_op, DOSFALSE, error_code);
 }
 
 static void complete_examine_next(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg)
@@ -1071,12 +1082,7 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 	return;
 
 error:
-	if (pending_op)
-		unlink_pending(fs, pending_op);
-
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = error_code;
-	reply_to_packet(fs, packet);
+	fail_pending(fs, packet, pending_op, DOSFALSE, error_code);
 }
 
 /*
@@ -1348,12 +1354,7 @@ static void action_parent(rl_amigafs_t *fs, struct DosPacket *packet)
 	return;
 
 error:
-	if (pending_op)
-		unlink_pending(fs, pending_op);
-
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = error_code;
-	reply_to_packet(fs, packet);
+	fail_pending(fs, packet, pending_op, DOSFALSE, error_code);
 }
 
 static void complete_parent(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg)
@@ -1442,14 +1443,7 @@ action_read(rl_amigafs_t *self, struct DosPacket *packet)
 	return;
 
 error:
-	if (pending_op)
-		unlink_pending(self, pending_op);
-
-	/* dp_Res1 is a byte count here, so failure is -1: zero would be read as a
-	 * clean end of file and the caller would silently truncate. */
-	packet->dp_Res1 = -1;
-	packet->dp_Res2 = error_code;
-	reply_to_packet(self, packet);
+	fail_pending(self, packet, pending_op, -1, error_code);
 }
 
 static int
@@ -1618,13 +1612,7 @@ action_write(rl_amigafs_t *self, struct DosPacket *packet)
 	return;
 
 error:
-	if (pending_op)
-		unlink_pending(self, pending_op);
-
-	/* As for reads, dp_Res1 is a byte count and -1 is the failure signal. */
-	packet->dp_Res1 = -1;
-	packet->dp_Res2 = error_code;
-	reply_to_packet(self, packet);
+	fail_pending(self, packet, pending_op, -1, error_code);
 }
 
 static void
