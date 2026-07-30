@@ -58,8 +58,9 @@ LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 800x600x24" \
 	> "$WORK/amiberry.log" 2>&1 &
 AMIBERRY_PID=$!
 
-# Wait for rl-target to bind. Each probe costs a peer index on the target, which
-# is why the payload derives its device name instead of assuming TBL0.
+# Wait for rl-target to bind. Each probe costs a peer index on the target, so
+# the device is not reliably TBL0 -- the payload opens its file by relative path
+# and never names the device.
 for i in $(seq 1 45); do
 	sleep 2
 	if (exec 3<>/dev/tcp/127.0.0.1/7001) 2>/dev/null; then

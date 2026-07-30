@@ -79,51 +79,23 @@ int main(const char *args)
 	 * blocked requester looks exactly like a hung filesystem. Fail instead. */
 	((struct Process *)FindTask(NULL))->pr_WindowPtr = (APTR)-1;
 
-	if (0 != (file = Open((STRPTR)"hello.txt", MODE_OLDFILE)))
+	/* Relative, on purpose: the target hands us the served directory as our
+	 * current directory, so this is the workflow the README advertises. No
+	 * fallback to an explicit TBLx: path -- if this fails the launch is broken
+	 * (#29) and the test should say so. */
+	if (0 == (file = Open((STRPTR)"hello.txt", MODE_OLDFILE)))
 	{
-		say("payload: opened via current dir\n");
-	}
-	else
-	{
-		/* The target is supposed to hand us the device root as our current
-		 * directory, but does not, so fall back to the device we were launched
-		 * from. GetProgramName() gives e.g. "TBL1:rl-payload"; the index varies
-		 * with how many peers have connected, so it cannot be hardcoded. */
-		char path[128];
-		int i = 0;
+		/* Read IoErr() before say(): FPuts()/Flush() are DOS calls of their
+		 * own and overwrite it, so reading it later reports their result. */
+		const LONG open_error = IoErr();
 
-		say("payload: no current dir (IoErr=");
-		saynum(IoErr());
-		say("), falling back to the launch device\n");
-
-		if (GetProgramName((STRPTR)path, (LONG)sizeof(path) - 16))
-		{
-			while (path[i] && path[i] != ':')
-				++i;
-
-			if (path[i] == ':')
-			{
-				const char *tail = "hello.txt";
-				++i;
-				while (*tail)
-					path[i++] = *tail++;
-				path[i] = '\0';
-
-				if (0 != (file = Open((STRPTR)path, MODE_OLDFILE)))
-				{
-					say("payload: opened via ");
-					say(path);
-					say("\n");
-				}
-			}
-		}
-	}
-
-	if (0 == file)
-	{
-		say("payload: cannot open hello.txt by any route\n");
+		say("payload: no current dir, relative open failed (IoErr=");
+		saynum(open_error);
+		say(")\n");
 		goto done;
 	}
+
+	say("payload: opened via current dir\n");
 
 	length = Read(file, buffer, (LONG)sizeof(buffer) - 1);
 	Close(file);

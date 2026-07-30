@@ -93,12 +93,12 @@ static __saveds ULONG cmd_launcher(void)
 {
 	launch_msg_t *launch_msg;
 	BPTR ihandle = 0, ohandle = 0;
+	BPTR old_dir = 0;
 	struct DosLibrary *DOSBase = 0;
 	struct ExecBase *SysBase;
 	char cmdline_with_args[512];
 
 	struct TagItem system_tags[] = {
-		{ NP_CurrentDir,			0 }, /* filled in below */
 		{ SYS_Input,				0 },
 		{ SYS_Output,				0 },
 		{ SYS_Asynch,				FALSE },
@@ -130,9 +130,8 @@ static __saveds ULONG cmd_launcher(void)
 	ohandle = Open(launch_msg->output_path, MODE_NEWFILE);
 
 	/* Populate the relevant tags with handle data */
-	system_tags[0].ti_Data = (Tag) MKBADDR(launch_msg->root_lock);
-	system_tags[1].ti_Data = (Tag) ihandle;
-	system_tags[2].ti_Data = (Tag) ohandle;
+	system_tags[0].ti_Data = (Tag) ihandle;
+	system_tags[1].ti_Data = (Tag) ohandle;
 
 	/* Format "<cmd> <args>" or "<cmd>" */
 	if (launch_msg->arguments[0])
@@ -142,14 +141,22 @@ static __saveds ULONG cmd_launcher(void)
 		rl_format_msg(cmdline_with_args, sizeof(cmdline_with_args), "%s",
 					  launch_msg->command_path);
 
+	/* Hand the shell the served directory by inheritance rather than with
+	 * NP_CurrentDir: the AROS SystemTagList() the emulator runs drops that tag
+	 * and falls back to duplicating the caller's current directory, which is
+	 * how the launched program ended up in DH0: instead of the virtual device.
+	 * Inheritance is the documented System() behaviour on AmigaOS 3.x too, and
+	 * it keeps the lock ours -- no guessing about who unlocks the tag. */
+	old_dir = CurrentDir(MKBADDR(launch_msg->root_lock));
+
 	launch_msg->result_code = SystemTagList(cmdline_with_args, &system_tags[0]);
 	if (-1 == launch_msg->result_code)
-	{
-		/* If SystemTagList() fails we have to clean up the current directory
-		 * lock manually */
-		UnLock(MKBADDR(launch_msg->root_lock));
 		launch_msg->result_code = 1;
-	}
+
+	/* Put the inherited directory back before dropping the lock: this process
+	 * exits by unlocking whatever pr_CurrentDir still points at. */
+	CurrentDir(old_dir);
+	UnLock(MKBADDR(launch_msg->root_lock));
 
 	RL_LOG_DEBUG(("[thread] command %s completed with code %d",
 				  launch_msg->command_path, launch_msg->result_code));
@@ -225,10 +232,10 @@ static int async_spawn(peer_t *peer, const char *cmd, const char *arguments)
 	RL_LOG_INFO(("launch output: %s", launch_msg->output_path));
 
 	/* Allocate a root lock structure as if opened by Open() on the device. The
-	 * launcher process will take ownership of the volume lock and use that as
-	 * the current directory of the spawned executable. This could indeed have
-	 * been done by the thread through Open(), but we save some time and just
-	 * allocate the lock here.
+	 * launcher process takes ownership: it makes the lock its own current
+	 * directory so the spawned executable inherits it, then unlocks it once
+	 * the command is done. This could indeed have been done by the thread
+	 * through Open(), but we save some time and just allocate the lock here.
 	 */
 	launch_msg->root_lock = rl_amigafs_alloc_root_lock(fs, SHARED_LOCK);
 
