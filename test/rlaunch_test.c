@@ -17,12 +17,16 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+/* Deliberately first: this drags in the system endian.h, so protocol.h's inline
+ * codecs below are parsed with the system BIG_ENDIAN macro already in scope.
+ * inline_codecs_survive_system_endian_h fails if they ever key off it again. */
+#include "socket_includes.h"
+
 /* file_server.c ships no header and everything interesting in it is static, so
  * pull the whole translation unit in rather than punching holes in it. rl-test
  * must therefore not also link file_server.c. */
 #include "file_server.c"
 
-#include "socket_includes.h"
 #include "version.h"
 #include "third_party/utest.h"
 
@@ -251,6 +255,24 @@ UTEST(protocol, messages_encode_in_big_endian_wire_order)
 
 	ASSERT_TRUE(found_big);
 	ASSERT_FALSE(found_little);
+}
+
+UTEST(protocol, inline_codecs_survive_system_endian_h)
+{
+	/* This TU includes socket_includes.h, which drags in glibc's <endian.h>
+	 * and its BIG_ENDIAN=4321 macro. The inline helpers must key off the
+	 * project's own RL_BIG_ENDIAN, so a system header cannot flip the wire
+	 * order in one translation unit and not the next. */
+	unsigned char buffer[4];
+	unsigned char *cursor = buffer;
+	const unsigned char *read_cursor = buffer;
+	rl_uint32 decoded = 0;
+
+	rl_encode_int4(&cursor, 0x01020304u);
+	ASSERT_EQ(0, memcmp(buffer, "\x01\x02\x03\x04", 4));
+
+	ASSERT_EQ(0, rl_decode_int4(&read_cursor, &decoded));
+	ASSERT_EQ(0x01020304u, decoded);
 }
 
 /* -------------------------------------------------------------------------

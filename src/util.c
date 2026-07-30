@@ -525,7 +525,7 @@ void rl_free_sized(void *ptr, size_t sz)
 }
 #endif
 
-#ifndef BIG_ENDIAN
+#ifndef RL_BIG_ENDIAN
 void byte_swap2(void *ptr_)
 {
 	unsigned char *ptr = (unsigned char *) ptr_;
@@ -544,7 +544,7 @@ void byte_swap4(void *ptr_)
 	ptr[2] = tmp1;
 	ptr[3] = tmp0;
 }
-#endif /* !BIG_ENDIAN */
+#endif /* !RL_BIG_ENDIAN */
 
 #if defined(NO_C_LIB)
 void rl_memcpy(void *dest_, const void *src_, size_t len)

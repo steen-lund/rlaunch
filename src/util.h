@@ -151,7 +151,7 @@ void rl_free_sized(void *ptr, size_t sz);
  * Endian support
  */
 
-#ifndef BIG_ENDIAN
+#ifndef RL_BIG_ENDIAN
 void byte_swap2(void *ptr);
 void byte_swap4(void *ptr);
 #endif

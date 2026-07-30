@@ -84,7 +84,7 @@ static INLINE void rl_decode_int2(const unsigned char **cursor, rl_uint16 *resul
 {
 	rl_uint8* dest = (rl_uint8*) result;
 
-#ifdef BIG_ENDIAN
+#ifdef RL_BIG_ENDIAN
 	dest[0] = (*cursor)[0];
 	dest[1] = (*cursor)[1];
 #else
@@ -99,7 +99,7 @@ static INLINE int rl_decode_int4(const unsigned char **cursor, rl_uint32 *result
 {
 	rl_uint8* dest = (rl_uint8*) result;
 
-#ifdef BIG_ENDIAN
+#ifdef RL_BIG_ENDIAN
 	dest[0] = (*cursor)[0];
 	dest[1] = (*cursor)[1];
 	dest[2] = (*cursor)[2];
@@ -125,7 +125,7 @@ static INLINE void rl_encode_int2(unsigned char **cursor, rl_uint16 v)
 {
 	const rl_uint8 *source = (rl_uint8*) &v;
 
-#ifdef BIG_ENDIAN
+#ifdef RL_BIG_ENDIAN
 	(*cursor)[0] = source[0];
 	(*cursor)[1] = source[1];
 #else
@@ -140,7 +140,7 @@ static INLINE void rl_encode_int4(unsigned char **cursor, rl_uint32 v)
 {
 	const rl_uint8 *source = (rl_uint8*) &v;
 
-#ifdef BIG_ENDIAN
+#ifdef RL_BIG_ENDIAN
 	(*cursor)[0] = source[0];
 	(*cursor)[1] = source[1];
 	(*cursor)[2] = source[2];
