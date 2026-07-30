@@ -463,11 +463,6 @@ UTEST(file_server, read_honours_the_requested_length)
 	rl_msg_t request, reply;
 	char root[256];
 
-#if defined(RL_POSIX)
-	/* The Win32 branch clamps to request->length correctly. */
-	UTEST_SKIP("#22: the POSIX read_file_request ignores request->length and always reads 4096");
-#endif
-
 	test_controller_init(&ctl, root, sizeof(root));
 	write_file(root, "big.txt", "0123456789");
 	test_peer_init(&peer, &ctl);
@@ -495,11 +490,6 @@ UTEST(file_server, reading_a_directory_handle_reports_not_a_file)
 	rl_msg_t request, reply;
 	char root[256];
 
-#if defined(RL_POSIX)
-	/* Win32 marks directories with INVALID_HANDLE_VALUE and rejects them. */
-	UTEST_SKIP("#22: POSIX directory handles store -1, fall through to pread() and report IO_ERROR");
-#endif
-
 	test_controller_init(&ctl, root, sizeof(root));
 	test_peer_init(&peer, &ctl);
 
@@ -514,6 +504,125 @@ UTEST(file_server, reading_a_directory_handle_reports_not_a_file)
 
 	test_peer_destroy(&peer);
 }
+
+UTEST(file_server, reading_a_closed_handle_does_not_fall_through_to_stdin)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	rl_msg_t request, reply;
+	char root[256];
+	rl_uint32 handle;
+
+	test_controller_init(&ctl, root, sizeof(root));
+	write_file(root, "hello.txt", "hi");
+	test_peer_init(&peer, &ctl);
+
+	open_request(&request, "hello.txt", RL_OPENFLAG_READ);
+	rl_file_serve(&peer, &request);
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	handle = reply.open_handle_answer.handle;
+
+	RL_MSG_INIT(request, RL_MSG_CLOSE_HANDLE_REQUEST);
+	request.close_handle_request.handle = handle;
+	rl_file_serve(&peer, &request);
+
+	RL_MSG_INIT(request, RL_MSG_READ_FILE_REQUEST);
+	request.read_file_request.handle = handle;
+	request.read_file_request.length = 16;
+	rl_file_serve(&peer, &request);
+
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ(RL_MSG_ERROR_ANSWER, (int)rl_msg_kind_of(&reply));
+
+	test_peer_destroy(&peer);
+}
+
+/*
+ * offset_hi carries the top 32 bits of the offset. A read at 4 GB of a tiny
+ * file must land past the end and come back empty, not wrap to offset_lo.
+ */
+UTEST(file_server, read_uses_the_high_half_of_the_offset)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	rl_msg_t request, reply;
+	char root[256];
+
+	test_controller_init(&ctl, root, sizeof(root));
+	write_file(root, "small.txt", "0123456789");
+	test_peer_init(&peer, &ctl);
+
+	open_request(&request, "small.txt", RL_OPENFLAG_READ);
+	rl_file_serve(&peer, &request);
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ(RL_MSG_OPEN_HANDLE_ANSWER, (int)rl_msg_kind_of(&reply));
+
+	RL_MSG_INIT(request, RL_MSG_READ_FILE_REQUEST);
+	request.read_file_request.handle = reply.open_handle_answer.handle;
+	request.read_file_request.offset_hi = 1;
+	request.read_file_request.offset_lo = 0;
+	request.read_file_request.length = 4;
+	rl_file_serve(&peer, &request);
+
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ(RL_MSG_READ_FILE_ANSWER, (int)rl_msg_kind_of(&reply));
+	ASSERT_EQ((rl_uint32)0, reply.read_file_answer.data.length);
+
+	test_peer_destroy(&peer);
+}
+
+#if defined(RL_POSIX)
+/*
+ * The virtual input handle carries host stdin, descriptor 0 - the same value a
+ * free or closed handle slot holds. Reading it has to work anyway, and the
+ * offset has to be ignored because a pipe cannot seek. Win32 keeps stdin in a
+ * real HANDLE, so the ambiguity is POSIX-only.
+ */
+UTEST(file_server, reading_the_virtual_input_handle_returns_host_stdin)
+{
+	rl_controller_t ctl;
+	peer_t peer;
+	rl_msg_t request, reply;
+	char root[256];
+	int pipe_fds[2];
+	int saved_stdin;
+
+	test_controller_init(&ctl, root, sizeof(root));
+
+	ctl.vinput_handle.type = RL_NODE_TYPE_FILE;
+	rl_string_copy(sizeof(ctl.vinput_handle.native_path),
+			ctl.vinput_handle.native_path, "(virtual input)");
+
+	/* An unseekable stdin, so a stray pread() here would fail with ESPIPE. */
+	TEST_REQUIRE(0 == pipe(pipe_fds));
+	TEST_REQUIRE(10 == write(pipe_fds[1], "from stdin", 10));
+	close(pipe_fds[1]);
+
+	saved_stdin = dup(STDIN_FILENO);
+	TEST_REQUIRE(-1 != saved_stdin);
+	TEST_REQUIRE(-1 != dup2(pipe_fds[0], STDIN_FILENO));
+	close(pipe_fds[0]);
+	ctl.vinput_handle.handle = STDIN_FILENO;
+
+	test_peer_init(&peer, &ctl);
+
+	RL_MSG_INIT(request, RL_MSG_READ_FILE_REQUEST);
+	request.read_file_request.handle = RL_FILEHANDLE_VIRTUAL_INPUT;
+	request.read_file_request.offset_lo = 4096; /* unseekable: must be ignored */
+	request.read_file_request.length = 16;
+	rl_file_serve(&peer, &request);
+
+	TEST_REQUIRE(-1 != dup2(saved_stdin, STDIN_FILENO));
+	close(saved_stdin);
+
+	ASSERT_EQ(0, pop_reply(&peer, &reply));
+	ASSERT_EQ(RL_MSG_READ_FILE_ANSWER, (int)rl_msg_kind_of(&reply));
+	ASSERT_EQ((rl_uint32)10, reply.read_file_answer.data.length);
+	ASSERT_EQ(0, memcmp(reply.read_file_answer.data.base, "from stdin", 10));
+
+	test_peer_destroy(&peer);
+}
+#endif
 
 UTEST(file_server, closing_a_handle_releases_the_descriptor)
 {

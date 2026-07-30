@@ -328,10 +328,6 @@ static rl_filehandle_t *make_handle(rl_controller_t *self, const char *path, int
 		int flags = 0;
 		struct stat st;
 
-#if !defined(RL_APPLE)
-		flags |= O_LARGEFILE;
-#endif
-
 		/* figure out if the requested path is a file or directory */
 		if (0 == (mode & RL_OPENFLAG_WRITE))
 		{
@@ -374,6 +370,12 @@ static rl_filehandle_t *make_handle(rl_controller_t *self, const char *path, int
 
 			if (mode & RL_OPENFLAG_CREATE)
 				flags |= O_CREAT;
+
+#if !defined(RL_APPLE)
+			/* Has to come after the access mode is picked above, which assigns
+			 * over flags rather than or-ing into it. */
+			flags |= O_LARGEFILE;
+#endif
 
 			slot->handle = open(native_path, flags, 0666);
 
@@ -680,16 +682,32 @@ static int read_file_request(peer_t *peer, const rl_msg_t *msg)
 	}
 
 #elif defined(RL_POSIX)
-	if (0 == handle->handle)
+	/* Directory handles hold -1 and free or closed slots hold 0, which is also
+	 * stdin's descriptor - so only the virtual input handle may read from it. */
+	if (RL_NODE_TYPE_FILE != handle->type)
 		return reply_with_error(peer, msg, RL_NETERR_NOT_A_FILE);
+
+	if (0 == handle->handle && handle != &self->vinput_handle)
+		return reply_with_error(peer, msg, RL_NETERR_INVALID_VALUE);
 
 	{
 		ssize_t read_size;
-		read_size = pread(
-				handle->handle,
-				read_buffer,
-				sizeof(read_buffer),
-				request->offset_lo);
+		size_t size_to_read = sizeof(read_buffer);
+
+		if (size_to_read > request->length)
+			size_to_read = request->length;
+
+		if (handle == &self->vinput_handle)
+		{
+			/* Standard input is not seekable, so the offset is meaningless. */
+			read_size = read(handle->handle, read_buffer, size_to_read);
+		}
+		else
+		{
+			const uint64_t offset =
+				((uint64_t) request->offset_hi << 32) | request->offset_lo;
+			read_size = pread(handle->handle, read_buffer, size_to_read, (off_t) offset);
+		}
 
 		if (-1 == read_size)
 			return reply_with_error(peer, msg, RL_NETERR_IO_ERROR);
