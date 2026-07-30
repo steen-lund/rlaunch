@@ -286,6 +286,7 @@ static int on_launch_executable_request(peer_t *peer, const rl_msg_t *msg)
 	else
 	{
 		RL_MSG_INIT(answer, RL_MSG_ERROR_ANSWER);
+		answer.error_answer.hdr_in_reply_to = msg->launch_executable_request.hdr_sequence_num;
 		answer.error_answer.error_code = RL_NETERR_SPAWN_FAILURE;
 	}
 	return peer_transmit_message(peer, &answer);

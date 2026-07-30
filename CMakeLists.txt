@@ -54,4 +54,9 @@ if(NOT AMIGA)
 			COMMAND ${CMAKE_SOURCE_DIR}/test/controller-connect-test.sh
 				$<TARGET_FILE:rl-controller> ${Python3_EXECUTABLE})
 	endif()
+
+	add_test(NAME controller-spawn-failure
+		COMMAND ${Python3_EXECUTABLE}
+			${CMAKE_SOURCE_DIR}/test/controller-spawn-failure-test.py
+			$<TARGET_FILE:rl-controller>)
 endif()

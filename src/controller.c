@@ -65,6 +65,16 @@ static int on_message_received(peer_t *peer, const rl_msg_t *msg)
 			{
 				self->state = CONTROLLER_FILE_SERVING;
 			}
+			else if (RL_MSG_ERROR_ANSWER == rl_msg_kind_of(msg))
+			{
+				/* An answer, never a file-server request: falling through to
+				 * rl_file_serve() replied BAD_REQUEST to it and left the peer
+				 * alive, so a failed spawn hung the controller forever. */
+				RL_LOG_CONSOLE(("target failed to launch '%s' (error %d)",
+						self->executable, (int) msg->error_answer.error_code));
+				self->result = 1;
+				return 1;
+			}
 			else if (RL_MSG_EXECUTABLE_DONE_REQUEST == rl_msg_kind_of(msg))
 			{
 				RL_LOG_INFO(("executable completed with rc=%d", msg->executable_done_request.result_code));
