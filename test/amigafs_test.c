@@ -899,3 +899,20 @@ UTEST(amigafs, a_die_packet_is_answered)
 
 	fixture_destroy(&fix);
 }
+
+UTEST(amigafs, an_unimplemented_action_says_why_it_refused)
+{
+	fs_fixture_t fix;
+	test_packet_t tp;
+	struct DosPacket *packet;
+
+	fixture_init(&fix);
+	packet = make_packet(&fix, &tp, ACTION_CREATE_DIR);
+	send_packet(&fix, &tp);
+
+	ASSERT_TRUE(packet_was_replied(&fix));
+	ASSERT_EQ((LONG)DOSFALSE, packet->dp_Res1);
+	ASSERT_EQ((LONG)ERROR_ACTION_NOT_KNOWN, packet->dp_Res2);
+
+	fixture_destroy(&fix);
+}

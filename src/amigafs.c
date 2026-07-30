@@ -394,16 +394,34 @@ static struct FileLock *duplicate_lock(rl_amigafs_t *fs, rl_client_handle_t *han
 	return lock;
 }
 
-/* Ask the server to open `path` and answer the pending op with the handle. */
-static int transmit_open_handle_request(rl_amigafs_t *fs, rl_pending_operation_t *op, const char *path)
+/*
+ * Ask the server to open `path`, routing the answer to `callback`. Every
+ * failure here answers the packet itself, so callers just return afterwards
+ * rather than repeating the alloc/transmit/unwind sequence.
+ */
+static void start_open_request(
+		rl_amigafs_t *fs,
+		struct DosPacket *packet,
+		const char *path,
+		rl_completion_callback_fn_t callback)
 {
 	rl_msg_t msg;
+	rl_pending_operation_t * const op =
+		alloc_pending(fs, packet, RL_MSG_OPEN_HANDLE_ANSWER, callback);
+
+	if (!op)
+	{
+		fail_pending(fs, packet, NULL, DOSFALSE, ERROR_NO_FREE_STORE);
+		return;
+	}
 
 	RL_MSG_INIT(msg, RL_MSG_OPEN_HANDLE_REQUEST);
 	msg.open_handle_request.hdr_sequence_num	= op->request_seqno;
 	msg.open_handle_request.path				= path;
 	msg.open_handle_request.mode				= RL_OPENFLAG_READ;
-	return peer_transmit_message(fs->peer, &msg);
+
+	if (0 != peer_transmit_message(fs->peer, &msg))
+		fail_pending(fs, packet, op, DOSFALSE, ERROR_NOT_A_DOS_DISK);
 }
 
 /* Hand a server-side handle back; its table of them is a fixed size. */
@@ -540,7 +558,6 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 	char full_path[RL_AMIGA_PATH_MAX];
 	const char *filename_cstr = filename;
 
-	rl_pending_operation_t *pending_op = NULL;
 	LONG error_code = 0;
 
     RL_LOG_DEBUG(("FINDINPUT: directory=\"%d\", name=\"%Q\"",
@@ -590,23 +607,11 @@ static void action_findinput(rl_amigafs_t *fs, struct DosPacket *packet)
 		goto error;
 
 	/* Construct a pending open for the file. */
-	pending_op = alloc_pending(fs, packet, RL_MSG_OPEN_HANDLE_ANSWER, complete_findinput);
-	if (!pending_op)
-	{
-		error_code = ERROR_NO_FREE_STORE;
-		goto error;
-	}
-
-	if (0 != transmit_open_handle_request(fs, pending_op, full_path))
-	{
-		error_code = ERROR_NOT_A_DOS_DISK;
-		goto error;
-	}
-
+	start_open_request(fs, packet, full_path, complete_findinput);
 	return;
 
 error:
-	fail_pending(fs, packet, pending_op, DOSFALSE, error_code);
+	fail_pending(fs, packet, NULL, DOSFALSE, error_code);
 }
 
 static void complete_findinput(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg)
@@ -735,9 +740,7 @@ static void action_findoutput(rl_amigafs_t *fs, struct DosPacket *packet)
 	return;
 
 error:
-	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = error_code;
-	reply_to_packet(fs, packet);
+	fail_pending(fs, packet, NULL, DOSFALSE, error_code);
 }
 
 /*
@@ -833,19 +836,7 @@ static void action_examine_next(rl_amigafs_t *fs, struct DosPacket *packet)
 	 * and let its completion restart the enumeration. */
 	if (lock && RL_ROOT_HANDLE_ID == handle->handle_id)
 	{
-		pending_op = alloc_pending(fs, packet, RL_MSG_OPEN_HANDLE_ANSWER, complete_root_enum_open);
-		if (!pending_op)
-		{
-			error_code = ERROR_NO_FREE_STORE;
-			goto error;
-		}
-
-		if (0 != transmit_open_handle_request(fs, pending_op, ""))
-		{
-			error_code = ERROR_NOT_A_DOS_DISK;
-			goto error;
-		}
-
+		start_open_request(fs, packet, "", complete_root_enum_open);
 		return;
 	}
 
@@ -1028,9 +1019,6 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 	const LONG mode = packet->dp_Arg3;
 	struct FileLock *result_lock = NULL;
 	char full_path[RL_AMIGA_PATH_MAX];
-	/* The root-lock path below can reach the error label before any pending
-	 * op exists, and the label frees whatever this points at. */
-	rl_pending_operation_t *pending_op = NULL;
 
     RL_LOG_DEBUG(("LOCATE_OBJECT: directory=\"%d\", name=\"%Q\" mode=%d (%s)",
 				dir_lock ? HANDLE_FROM_LOCK(dir_lock)->handle_id : -1,
@@ -1066,23 +1054,11 @@ static void action_locate_object(rl_amigafs_t *fs, struct DosPacket* packet)
 	}
 	
 	/* Construct a pending handle open request for the object */
-	pending_op = alloc_pending(fs, packet, RL_MSG_OPEN_HANDLE_ANSWER, complete_locate_object);
-	if (!pending_op)
-	{
-		error_code = ERROR_NO_FREE_STORE;
-		goto error;
-	}
-
-	if (0 != transmit_open_handle_request(fs, pending_op, full_path))
-	{
-		error_code = ERROR_NOT_A_DOS_DISK;
-		goto error;
-	}
-
+	start_open_request(fs, packet, full_path, complete_locate_object);
 	return;
 
 error:
-	fail_pending(fs, packet, pending_op, DOSFALSE, error_code);
+	fail_pending(fs, packet, NULL, DOSFALSE, error_code);
 }
 
 /*
@@ -1299,8 +1275,6 @@ static void action_parent(rl_amigafs_t *fs, struct DosPacket *packet)
 	struct FileLock *lock = BCPL_CAST(struct FileLock, packet->dp_Arg1);
 	rl_client_handle_t *handle = lock ? HANDLE_FROM_LOCK(lock) : NULL;
 	struct FileLock *result_lock;
-	rl_pending_operation_t *pending_op = NULL;
-	LONG error_code;
 	char parent_path[RL_AMIGA_PATH_MAX];
 
 	RL_LOG_DEBUG(("ACTION_PARENT for lock %p (%d)", lock, handle ? (int) handle->handle_id : -1));
@@ -1338,23 +1312,7 @@ static void action_parent(rl_amigafs_t *fs, struct DosPacket *packet)
 	 * unlocking it would close the root out from under the connection. */
 	RL_LOG_DEBUG(("parent handle from '%s' to '%s'", handle->path, parent_path));
 
-	pending_op = alloc_pending(fs, packet, RL_MSG_OPEN_HANDLE_ANSWER, complete_parent);
-	if (!pending_op)
-	{
-		error_code = ERROR_NO_FREE_STORE;
-		goto error;
-	}
-
-	if (0 != transmit_open_handle_request(fs, pending_op, parent_path))
-	{
-		error_code = ERROR_NOT_A_DOS_DISK;
-		goto error;
-	}
-
-	return;
-
-error:
-	fail_pending(fs, packet, pending_op, DOSFALSE, error_code);
+	start_open_request(fs, packet, parent_path, complete_parent);
 }
 
 static void complete_parent(rl_amigafs_t *fs, rl_pending_operation_t *op, const rl_msg_t *msg)
@@ -2127,6 +2085,8 @@ static void action_unsupported(rl_amigafs_t *self, struct DosPacket* packet)
 {
 	RL_LOG_DEBUG(("%s: unsupported", get_packet_type_name(packet)));
 	packet->dp_Res1 = DOSFALSE;
-	packet->dp_Res2 = 0;
+	/* Zero told the caller nothing about why it failed; the packet type is
+	 * known but unimplemented, which is what AmigaDOS reads this code as. */
+	packet->dp_Res2 = ERROR_ACTION_NOT_KNOWN;
 	reply_to_packet(self, packet);
 }
