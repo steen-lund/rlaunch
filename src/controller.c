@@ -351,6 +351,12 @@ int main(int argc, char** argv)
 
 	memset(&ctrl, 0, sizeof(ctrl));
 
+	/* Failed until proven otherwise: every early exit below (usage, socket
+	 * init, connect) and a peer that dies without reporting a result then
+	 * leaves a non-zero exit code behind for the caller. Only a completed
+	 * remote program overwrites this, with its own return code. */
+	ctrl.result = 1;
+
 	/* parse the command line options */
 	{
 		int options_done = 0;
@@ -455,7 +461,8 @@ int main(int argc, char** argv)
 
 	peer->userdata = &ctrl;
 
-	pump_peer_state_machine(peer);
+	if (0 != pump_peer_state_machine(peer))
+		ctrl.result = 1;
 
 cleanup:
 	if (peer)

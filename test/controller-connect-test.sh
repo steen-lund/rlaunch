@@ -31,10 +31,14 @@ s.close()')
 
 echo "connecting to a closed port $PORT"
 
-# The controller exits 0 even when it never connects (separate defect), so the
-# verdict has to come from what it printed.
-OUTPUT=$("$CONTROLLER" -port "$PORT" 127.0.0.1 c:info 2>&1 || true)
+OUTPUT=$("$CONTROLLER" -port "$PORT" 127.0.0.1 c:info 2>&1) && STATUS=0 || STATUS=$?
 echo "$OUTPUT"
+echo "controller exit: $STATUS"
+
+if [ "$STATUS" -eq 0 ]; then
+	echo "FAIL: controller exited 0 after failing to connect" >&2
+	exit 1
+fi
 
 case "$OUTPUT" in
 	*"couldn't connect to any of the addresses"*)
