@@ -42,9 +42,12 @@ cp "$AMIGA_BUILD/rl-target" "$WORK/dh0/rl-target"
 printf 'SYS:rl-target\n' > "$WORK/dh0/S/Startup-Sequence"
 
 # This is the directory the controller serves; the Amiga sees it as TBLx:.
-mkdir -p "$WORK/fsroot"
+mkdir -p "$WORK/fsroot/sub"
 cp "$AMIGA_BUILD/rl-payload" "$WORK/fsroot/rl-payload"
 printf 'hello from the host' > "$WORK/fsroot/hello.txt"
+# The one subdirectory: without it nothing on the Amiga side can build a
+# multi-component path, take a lock below the root, or walk back out of one.
+printf 'nested from the host' > "$WORK/fsroot/sub/nested.txt"
 
 echo "== booting AROS =="
 # -a picks a free display number rather than failing on a stale lock file.
@@ -77,7 +80,10 @@ done
 
 launch() {
 	set +e
-	OUTPUT=$(timeout 120 "$BUILD/rl-controller" -fsroot "$WORK/fsroot" 127.0.0.1 rl-payload "$@" 2>&1)
+	# The line on stdin is what the payload reads back through Input(): the
+	# controller serves its own stdin as the remote program's input handle.
+	OUTPUT=$(printf 'typed at the controller\n' | \
+		timeout 120 "$BUILD/rl-controller" -fsroot "$WORK/fsroot" 127.0.0.1 rl-payload "$@" 2>&1)
 	STATUS=$?
 	set -e
 	echo "$OUTPUT"
@@ -101,6 +107,13 @@ fi
 expect_output 'read back "hello from the host"' "payload did not read the served file back"
 expect_output 'seek read back "from the host"' "payload did not read the file back after a Seek()"
 expect_output 'listed hello.txt and rl-payload' "payload did not enumerate the served directory"
+expect_output 'read back "nested from the host" from sub/nested.txt' \
+	"payload did not read through a multi-component path"
+expect_output 'DupLock of sub examines as sub' "payload did not duplicate a lock on the subdirectory"
+expect_output 'parent of sub lists the served root' "payload did not walk back out of the subdirectory"
+expect_output 'missing file reported object not found' \
+	"payload did not get ERROR_OBJECT_NOT_FOUND for a file that is not served"
+expect_output 'read the line typed at the controller' "payload did not read the controller's stdin"
 
 # Same launch, but the payload returns 42. Anything else means the remote
 # return code did not survive the trip -- including the 0 the first run gave
@@ -113,4 +126,4 @@ if [ "$STATUS" -ne 42 ]; then
 	exit 1
 fi
 
-echo "PASS: the payload read, seeked and listed over the wire, and both its return codes came back"
+echo "PASS: the payload read, seeked, listed, walked a subdirectory, failed to open a missing file and read stdin over the wire, and both its return codes came back"

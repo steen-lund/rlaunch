@@ -8,8 +8,10 @@
  * code. Between them that is the whole round trip.
  *
  * Deliberately small: it walks the paths a user walks -- open, read, seek,
- * list a directory -- and nothing else. Corner cases belong in the host-side
- * unit tests, which are far cheaper to run than a booted emulator.
+ * list a directory, step in and out of a subdirectory, fail to open something
+ * that is not there, read a line typed at the controller -- and nothing else.
+ * Corner cases belong in the host-side unit tests, which are far cheaper to
+ * run than a booted emulator.
  *
  * Given the argument "fail" it returns FAIL_MODE_CODE instead of 0, so the
  * script can prove the remote return code really travels back rather than
@@ -35,6 +37,12 @@ extern struct DosLibrary *DOSBase;
 #define TAIL_OFFSET 6
 #define EXPECTED_TAIL "from the host"
 #define FAIL_MODE_CODE 42
+#define SUBDIR "sub"
+#define NESTED_PATH SUBDIR "/nested.txt"
+#define NESTED_EXPECTED "nested from the host"
+#define MISSING_NAME "nope.txt"
+/* FGets() keeps the newline, so the comparison has to expect it. */
+#define EXPECTED_STDIN "typed at the controller\n"
 
 static void say(const char *text)
 {
@@ -164,24 +172,20 @@ done:
 }
 
 /*
- * Enumerate the served directory and confirm both files the script puts there
- * come back. Every name is echoed, so a mismatch shows what was served instead
- * of just reporting that something was missing.
+ * Enumerate the directory `dir` names and confirm both files the script puts in
+ * the served root come back. Every name is echoed, so a mismatch shows what was
+ * served instead of just reporting that something was missing.
+ *
+ * Takes a lock rather than finding one itself, so the same check can prove a
+ * lock arrived at from somewhere else -- Parent() of the subdirectory -- really
+ * does name the root.
  */
-static int check_directory(void)
+static int list_served_root(BPTR dir)
 {
 	struct FileInfoBlock *fib = NULL;
-	BPTR dir;
 	int found_file = 0;
 	int found_payload = 0;
 	int result = 0;
-
-	/* An empty name locks the current directory, which is the served root. */
-	if (0 == (dir = Lock((STRPTR)"", SHARED_LOCK)))
-	{
-		say_failed("payload: cannot lock the current dir", IoErr());
-		return 0;
-	}
 
 	/* AllocDosObject rather than a local: ExNext() needs the block longword
 	 * aligned and DOS owns that guarantee, not the compiler. */
@@ -230,8 +234,206 @@ static int check_directory(void)
 done:
 	if (fib)
 		FreeDosObject(DOS_FIB, fib);
+	return result;
+}
+
+static int check_directory(void)
+{
+	BPTR dir;
+	int result;
+
+	/* An empty name locks the current directory, which is the served root. */
+	if (0 == (dir = Lock((STRPTR)"", SHARED_LOCK)))
+	{
+		say_failed("payload: cannot lock the current dir", IoErr());
+		return 0;
+	}
+
+	result = list_served_root(dir);
 	UnLock(dir);
 	return result;
+}
+
+/*
+ * Examine `lock` and confirm it names `expected`. fib_FileName is the final
+ * component only, so this says which object the lock ended up on without
+ * depending on how it was reached.
+ */
+static int examine_named(BPTR lock, const char *expected)
+{
+	struct FileInfoBlock *fib;
+	int result = 0;
+
+	if (NULL == (fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL)))
+	{
+		say("payload: no memory for a FileInfoBlock\n");
+		return 0;
+	}
+
+	if (!Examine(lock, fib))
+	{
+		say_failed("payload: Examine failed", IoErr());
+		goto done;
+	}
+
+	if (!same((const char *)fib->fib_FileName, expected))
+	{
+		say("payload: examined \"");
+		say((const char *)fib->fib_FileName);
+		say("\", wanted \"");
+		say(expected);
+		say("\"\n");
+		goto done;
+	}
+
+	result = 1;
+
+done:
+	FreeDosObject(DOS_FIB, fib);
+	return result;
+}
+
+/*
+ * The served root is flat apart from one subdirectory, and that subdirectory is
+ * what makes the multi-component paths reachable: opening SUBDIR/nested.txt is
+ * the join the host does in fix_path(), which is also the boundary that keeps a
+ * remote path from climbing out of the served root. Locking the directory and
+ * walking back out of it covers DupLock() and Parent(), neither of which a flat
+ * directory can reach.
+ */
+static int check_subdir(void)
+{
+	char buffer[128];
+	BPTR file, dir, copy, parent;
+	LONG length;
+	int result = 0;
+
+	if (0 == (file = Open((STRPTR)NESTED_PATH, MODE_OLDFILE)))
+	{
+		say_failed("payload: cannot open " NESTED_PATH, IoErr());
+		return 0;
+	}
+
+	length = Read(file, buffer, (LONG)sizeof(buffer) - 1);
+	Close(file);
+
+	if (length < 0)
+	{
+		say("payload: read of " NESTED_PATH " failed\n");
+		return 0;
+	}
+
+	buffer[length] = '\0';
+
+	if (!same(buffer, NESTED_EXPECTED))
+	{
+		say("payload: " NESTED_PATH " gave \"");
+		say(buffer);
+		say("\", wanted \"" NESTED_EXPECTED "\"\n");
+		return 0;
+	}
+
+	say("payload: read back \"" NESTED_EXPECTED "\" from " NESTED_PATH "\n");
+
+	if (0 == (dir = Lock((STRPTR)SUBDIR, SHARED_LOCK)))
+	{
+		say_failed("payload: cannot lock " SUBDIR, IoErr());
+		return 0;
+	}
+
+	if (0 == (copy = DupLock(dir)))
+	{
+		say_failed("payload: DupLock failed", IoErr());
+		goto done;
+	}
+
+	/* The copy has to name the same directory the original does -- a lock that
+	 * quietly fell back to the root would still examine, just as the wrong
+	 * object. */
+	if (!examine_named(copy, SUBDIR))
+	{
+		UnLock(copy);
+		goto done;
+	}
+
+	UnLock(copy);
+	say("payload: DupLock of " SUBDIR " examines as " SUBDIR "\n");
+
+	if (0 == (parent = ParentDir(dir)))
+	{
+		say_failed("payload: ParentDir failed", IoErr());
+		goto done;
+	}
+
+	/* Listing it rather than examining it: the root examines as the volume
+	 * name, and the device number depends on how many peers the target has
+	 * handed out, so its contents are the identity this side can rely on. */
+	result = list_served_root(parent);
+	UnLock(parent);
+
+	if (result)
+		say("payload: parent of " SUBDIR " lists the served root\n");
+
+done:
+	UnLock(dir);
+	return result;
+}
+
+/*
+ * Open something that is not there. This is the only leg that carries a failure
+ * answer back over the wire, so it is the one that proves the host's "not
+ * found" arrives as ERROR_OBJECT_NOT_FOUND rather than as a hang or a
+ * successful open of nothing.
+ */
+static int check_missing(void)
+{
+	BPTR file;
+	LONG error;
+
+	if (0 != (file = Open((STRPTR)MISSING_NAME, MODE_OLDFILE)))
+	{
+		say("payload: opening " MISSING_NAME " succeeded, but nothing serves it\n");
+		Close(file);
+		return 0;
+	}
+
+	error = IoErr();
+
+	if (ERROR_OBJECT_NOT_FOUND != error)
+	{
+		say_failed("payload: wrong error for a missing file", error);
+		return 0;
+	}
+
+	say("payload: missing file reported object not found\n");
+	return 1;
+}
+
+/*
+ * Read the line the script pipes into the controller. Input() is the virtual
+ * input handle, so this travels the same wire as the file reads above and ends
+ * up at the controller's own stdin.
+ */
+static int check_stdin(void)
+{
+	char buffer[128];
+
+	if (NULL == FGets(Input(), (STRPTR)buffer, (LONG)sizeof(buffer)))
+	{
+		say_failed("payload: nothing came back from Input()", IoErr());
+		return 0;
+	}
+
+	if (!same(buffer, EXPECTED_STDIN))
+	{
+		say("payload: stdin gave \"");
+		say(buffer);
+		say("\", wanted \"" EXPECTED_STDIN "\"\n");
+		return 0;
+	}
+
+	say("payload: read the line typed at the controller\n");
+	return 1;
 }
 
 /*
@@ -275,7 +477,8 @@ int main(void)
 
 	fail_mode = fail_mode_requested();
 
-	if (check_file() && check_directory())
+	if (check_file() && check_directory() && check_subdir() &&
+		check_missing() && check_stdin())
 	{
 		result = RETURN_OK;
 
