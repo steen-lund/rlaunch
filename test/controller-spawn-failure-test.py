@@ -9,6 +9,8 @@
 #
 # Usage: controller-spawn-failure-test.py <rl-controller>
 
+import os
+import re
 import socket
 import struct
 import subprocess
@@ -19,7 +21,24 @@ MSG_HANDSHAKE_REQUEST = 0x3
 MSG_LAUNCH_EXECUTABLE_REQUEST = 0xe
 
 NETERR_SPAWN_FAILURE = 254
-VER_MAJOR, VER_MINOR = 1, 0
+
+
+def source_version():
+    """The controller drops peers whose version differs, so read the one it
+    was built with instead of hardcoding a number that goes stale on a bump."""
+    header = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          '..', 'src', 'version.h')
+    with open(header) as f:
+        text = f.read()
+    def field(name):
+        m = re.search(r'^#define\s+RLAUNCH_VER_%s\s+(\d+)' % name, text,
+                      re.MULTILINE)
+        assert m, 'no RLAUNCH_VER_%s in %s' % (name, header)
+        return int(m.group(1))
+    return field('MAJOR'), field('MINOR')
+
+
+VER_MAJOR, VER_MINOR = source_version()
 
 
 def encode(kind, seq, payload):
