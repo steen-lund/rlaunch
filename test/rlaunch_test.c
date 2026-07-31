@@ -1085,7 +1085,7 @@ UTEST(peer_handshake, an_identical_version_connects)
 	rl_memset(&ctl, 0, sizeof(ctl));
 	handshake_peer_init(&peer, &ctl);
 
-	make_handshake(&handshake, RLAUNCH_VER_MAJOR, RLAUNCH_VER_MINOR);
+	make_handshake(&handshake, RLAUNCH_PROTO_MAJOR, RLAUNCH_PROTO_MINOR);
 	feed_message(&peer, &handshake);
 
 	ASSERT_EQ(PEER_CONNECTED, peer.state);
@@ -1104,7 +1104,7 @@ UTEST(peer_handshake, a_differing_minor_version_is_rejected)
 	rl_memset(&ctl, 0, sizeof(ctl));
 	handshake_peer_init(&peer, &ctl);
 
-	make_handshake(&handshake, RLAUNCH_VER_MAJOR, RLAUNCH_VER_MINOR + 1);
+	make_handshake(&handshake, RLAUNCH_PROTO_MAJOR, RLAUNCH_PROTO_MINOR + 1);
 	feed_message(&peer, &handshake);
 
 	ASSERT_EQ(PEER_ERROR, peer.state);
@@ -1121,7 +1121,7 @@ UTEST(peer_handshake, a_differing_major_version_is_rejected)
 	rl_memset(&ctl, 0, sizeof(ctl));
 	handshake_peer_init(&peer, &ctl);
 
-	make_handshake(&handshake, RLAUNCH_VER_MAJOR + 1, RLAUNCH_VER_MINOR);
+	make_handshake(&handshake, RLAUNCH_PROTO_MAJOR + 1, RLAUNCH_PROTO_MINOR);
 	feed_message(&peer, &handshake);
 
 	ASSERT_EQ(PEER_ERROR, peer.state);
@@ -1144,7 +1144,7 @@ UTEST(peer_handshake, a_failed_reply_does_not_report_the_peer_connected)
 	handshake_peer_init(&peer, &ctl);
 	ASSERT_EQ(PEER_INIT_TARGET, peer.init_mode);
 
-	make_handshake(&handshake, RLAUNCH_VER_MAJOR, RLAUNCH_VER_MINOR);
+	make_handshake(&handshake, RLAUNCH_PROTO_MAJOR, RLAUNCH_PROTO_MINOR);
 
 	/* Starve the buffer the outgoing handshake is encoded into. This fails the
 	 * *next* allocation rather than a named call site, so it only stays aimed at

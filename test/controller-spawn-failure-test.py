@@ -24,16 +24,16 @@ NETERR_SPAWN_FAILURE = 254
 
 
 def source_version():
-    """The controller drops peers whose version differs, so read the one it
-    was built with instead of hardcoding a number that goes stale on a bump."""
+    """The controller drops peers whose protocol version differs, so read the
+    one it was built with instead of hardcoding a number that goes stale."""
     header = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           '..', 'src', 'version.h')
     with open(header) as f:
         text = f.read()
     def field(name):
-        m = re.search(r'^#define\s+RLAUNCH_VER_%s\s+(\d+)' % name, text,
+        m = re.search(r'^#define\s+RLAUNCH_PROTO_%s\s+(\d+)' % name, text,
                       re.MULTILINE)
-        assert m, 'no RLAUNCH_VER_%s in %s' % (name, header)
+        assert m, 'no RLAUNCH_PROTO_%s in %s' % (name, header)
         return int(m.group(1))
     return field('MAJOR'), field('MINOR')
 

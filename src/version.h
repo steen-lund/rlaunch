@@ -16,6 +16,16 @@
 
 #define RLAUNCH_VERSION RLAUNCH_VER_MAJOR_STR "." RLAUNCH_VER_MINOR_STR
 
+/* What the handshake compares, which is not the release version: peers must
+ * agree exactly, so a release that leaves the wire format alone must leave
+ * these alone too or every already-installed target stops connecting. Bump
+ * only when the message format changes. Still 1.0 as of release 1.1 -- the
+ * 1.1 protocol work hardened the decoders without moving the format. */
+#define RLAUNCH_PROTO_MAJOR 1
+#define RLAUNCH_PROTO_MINOR 0
+
+#define RLAUNCH_PROTO_VERSION TOSTRING(RLAUNCH_PROTO_MAJOR) "." TOSTRING(RLAUNCH_PROTO_MINOR)
+
 #define RLAUNCH_LICENSE "Copyright (c)2009 Andreas Fredriksson, TBL Technologies. All rights reserved."
 
 #endif

@@ -140,8 +140,8 @@ static void on_transmit_handshake(peer_t *self, const rl_msg_t *param_unused_)
 	RL_MSG_INIT(msg, RL_MSG_HANDSHAKE_REQUEST);
 
 	request = &msg.handshake_request;
-	request->version_major = RLAUNCH_VER_MAJOR;
-	request->version_minor = RLAUNCH_VER_MINOR;
+	request->version_major = RLAUNCH_PROTO_MAJOR;
+	request->version_minor = RLAUNCH_PROTO_MINOR;
 
 #if defined(RL_AMIGA)
 	request->platform_name = "AmigaOS";
@@ -208,7 +208,7 @@ static void on_transmit_handshake(peer_t *self, const rl_msg_t *param_unused_)
 
 static void on_receive_handshake(peer_t *self, const rl_msg_t *param)
 {
-	RL_LOG_INFO(("%s: peer is %s running rlaunch v%d.%d on %s (%s)",
+	RL_LOG_INFO(("%s: peer is %s speaking protocol %d.%d on %s (%s)",
 				self->ident,
 				param->handshake_request.node_name,
 				param->handshake_request.version_major,
@@ -216,9 +216,10 @@ static void on_receive_handshake(peer_t *self, const rl_msg_t *param)
 				param->handshake_request.platform_name,
 				param->handshake_request.platform_version));
 
-	/* Require exactly the same version */
-	if (param->handshake_request.version_major == RLAUNCH_VER_MAJOR &&
-		param->handshake_request.version_minor == RLAUNCH_VER_MINOR)
+	/* Require exactly the same protocol version -- not the release version,
+	 * which moves without the wire format. */
+	if (param->handshake_request.version_major == RLAUNCH_PROTO_MAJOR &&
+		param->handshake_request.version_minor == RLAUNCH_PROTO_MINOR)
 	{
 		if (PEER_INIT_TARGET == self->init_mode)
 		{
@@ -235,7 +236,7 @@ static void on_receive_handshake(peer_t *self, const rl_msg_t *param)
 	}
 	else
 	{
-		RL_LOG_CONSOLE(("disconnection peer %s with unsupported version %d.%d (local version " RLAUNCH_VERSION ")",
+		RL_LOG_CONSOLE(("disconnection peer %s with unsupported protocol %d.%d (local protocol " RLAUNCH_PROTO_VERSION ", rlaunch " RLAUNCH_VERSION ")",
 						param->handshake_request.node_name,
 						param->handshake_request.version_major,
 						param->handshake_request.version_minor));
